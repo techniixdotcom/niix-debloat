@@ -72,7 +72,7 @@ they are not touched by the AppX removal list.
 
 1. Set your **username and password** during the OOBE setup screen — this is the only prompt you will see.
 2. At first login, **run `niix-tweaks.ps1`** from your desktop as Administrator to finish the runtime tweaks.
-3. Activate Windows with your own valid license key (Settings → System → Activation).
+3. Why not try Linux in a VM at first
 
 ---
 
