@@ -272,9 +272,9 @@ $pkgPrefixes = @(
     'Microsoft.GetHelp','Microsoft.Getstarted',
     'Microsoft.Microsoft3DViewer','Microsoft.MicrosoftOfficeHub',
     'Microsoft.MicrosoftSolitaireCollection','Microsoft.MicrosoftStickyNotes',
-    'Microsoft.MixedReality.Portal','Microsoft.MSPaint',
+    'Microsoft.MixedReality.Portal',
     'Microsoft.Office.OneNote','Microsoft.OfficePushNotificationUtility',
-    'Microsoft.OutlookForWindows','Microsoft.Paint','Microsoft.People',
+    'Microsoft.OutlookForWindows','Microsoft.People',
     'Microsoft.PowerAutomateDesktop','Microsoft.SkypeApp',
     'Microsoft.StartExperiencesApp','Microsoft.Todos','Microsoft.Wallet',
     'Microsoft.Windows.DevHome','Microsoft.Windows.Copilot',
@@ -809,6 +809,8 @@ $items = @(
     "Hardware bypass (TPM / SecureBoot / CPU / RAM)",
     "Windows Update suppressed during OOBE (re-enabled post-install)",
     "autounattend.xml embedded -- runtime TPM bypass + setup scripts",
+    "niix-tweaks.ps1 embedded -- run it after first login for gaming/",
+    "  performance tweaks (Game Mode, GPU scheduling, VBS off, etc.)",
 )
 foreach ($item in $items) {
     Write-Host "   * $item" -ForegroundColor $WHITE

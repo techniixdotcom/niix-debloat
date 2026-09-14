@@ -159,7 +159,7 @@ $bloat = @(
     'Microsoft.Copilot','Microsoft.Windows.CrossDevice','Microsoft.GetHelp',
     'Microsoft.Getstarted','Microsoft.Microsoft3DViewer','Microsoft.MicrosoftOfficeHub',
     'Microsoft.MicrosoftSolitaireCollection','Microsoft.MicrosoftStickyNotes',
-    'Microsoft.MixedReality.Portal','Microsoft.MSPaint','Microsoft.Office.OneNote',
+    'Microsoft.MixedReality.Portal','Microsoft.Office.OneNote',
     'Microsoft.OfficePushNotificationUtility','Microsoft.OutlookForWindows',
     'Microsoft.People','Microsoft.PowerAutomateDesktop','Microsoft.SkypeApp',
     'Microsoft.StartExperiencesApp','Microsoft.Todos','Microsoft.Wallet',
@@ -510,9 +510,62 @@ try {
 Set-Reg 'HKLM:\SYSTEM\CurrentControlSet\Control\BitLocker' 'PreventDeviceEncryption' 'DWord' 1
 
 # ============================================================
-#  14. MISCELLANEOUS
+#  14. GAMING / SYSTEM PERFORMANCE TWEAKS
 # ============================================================
-Write-Title "14. Miscellaneous hardening..."
+Write-Title "14. Applying gaming / system performance tweaks..."
+
+# --- Windows Game Mode: ON ---
+# Lets Windows prioritize the foreground game process and throttle
+# background activity at the OS level. This is a different setting from
+# "AllowAutoGameMode" (set to 0 in step 4 above, which only stops the
+# Game Bar overlay from auto-launching) - Game Mode itself stays enabled.
+Set-Reg 'HKCU:\SOFTWARE\Microsoft\GameBar' 'AutoGameModeEnabled' 'DWord' 1
+Set-Reg 'HKCU:\SOFTWARE\Microsoft\GameBar' 'AllowAutoGameMode'   'DWord' 1
+Write-Ok "Game Mode enabled"
+
+# --- Xbox Game Bar: DISABLED ---
+# Stops the Game Bar overlay from popping up on the Guide button (Win+G).
+# (Services + AllowGameDVR policy already handled in step 4 above.)
+Set-Reg 'HKCU:\SOFTWARE\Microsoft\GameBar' 'ShowStartupPanel'           'DWord' 0
+Set-Reg 'HKCU:\SOFTWARE\Microsoft\GameBar' 'GamePanelStartupTipIndex'   'DWord' 3
+Set-Reg 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\GameDVR' 'AppCaptureEnabled' 'DWord' 0
+Write-Ok "Xbox Game Bar disabled"
+
+# --- Mouse Acceleration: DISABLED ---
+# Turns off "Enhance Pointer Precision" so cursor movement is 1:1 with
+# physical mouse movement. These are REG_SZ (string) values, not DWORD.
+Set-Reg 'HKCU:\Control Panel\Mouse' 'MouseSpeed'      'String' '0'
+Set-Reg 'HKCU:\Control Panel\Mouse' 'MouseThreshold1'  'String' '0'
+Set-Reg 'HKCU:\Control Panel\Mouse' 'MouseThreshold2'  'String' '0'
+Write-Ok "Mouse acceleration disabled"
+
+# --- Fullscreen Optimizations: DISABLED (system-wide exclusive fullscreen) ---
+Set-Reg 'HKCU:\System\GameConfigStore' 'GameDVR_FSEBehavior'                  'DWord' 2
+Set-Reg 'HKCU:\System\GameConfigStore' 'GameDVR_FSEBehaviorMode'              'DWord' 2
+Set-Reg 'HKCU:\System\GameConfigStore' 'GameDVR_HonorUserFSEBehaviorMode'     'DWord' 1
+Set-Reg 'HKCU:\System\GameConfigStore' 'GameDVR_DXGIHonorFSEWindowsCompatible' 'DWord' 1
+Write-Ok "Fullscreen optimizations disabled (exclusive fullscreen forced)"
+
+# --- Hardware-Accelerated GPU Scheduling: ON ---
+# Requires a WDDM 2.7+ driver; harmless no-op on hardware that doesn't support it.
+Set-Reg 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers' 'HwSchMode' 'DWord' 2
+Write-Ok "Hardware-accelerated GPU scheduling enabled (reboot required)"
+
+# --- Core Isolation / Memory Integrity (VBS): DISABLED ---
+# Reclaims the CPU overhead VBS/HVCI taxes on some systems.
+# WARNING: reduces hypervisor-based system protection.
+Set-Reg 'HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard' 'EnableVirtualizationBasedSecurity' 'DWord' 0
+Set-Reg 'HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity' 'Enabled' 'DWord' 0
+Set-Reg 'HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\CredentialGuard'                 'Enabled' 'DWord' 0
+Set-Reg 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' 'LsaCfgFlags' 'DWord' 0
+Write-Warn "Core Isolation (VBS) disabled - reduces hypervisor-based system protection"
+
+Write-Ok "Gaming / performance tweaks applied (reboot required for GPU scheduling + VBS)"
+
+# ============================================================
+#  15. MISCELLANEOUS
+# ============================================================
+Write-Title "15. Miscellaneous hardening..."
 
 Set-Reg 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' 'LongPathsEnabled'                 'DWord' 1
 Set-Reg 'HKCU:\Control Panel\Accessibility\StickyKeys'      'Flags'                            'String' '10'

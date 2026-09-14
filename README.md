@@ -55,7 +55,16 @@ PowerShell -ExecutionPolicy Bypass -File "niixdebloat.ps1"
 - Applies privacy service lockdown
 - Disables SmartScreen, OneDrive sync and Content Delivery
 - Sets Windows Update to notify-only (no auto-install)
-- Activates Windows automatically via HWID (requires internet)
+- Applies gaming/system performance tweaks (Game Mode, Xbox Game Bar off,
+  mouse acceleration off, fullscreen optimizations off, hardware-accelerated
+  GPU scheduling on, Core Isolation/VBS off)
+
+Paint, Notepad, Snipping Tool and Photos are intentionally left installed —
+they are not touched by the AppX removal list.
+
+> **Note:** this script does **not** activate Windows. You'll still need to
+> activate through a genuine license (retail key, volume license, or a
+> digital entitlement already tied to the machine) after install.
 
 ---
 
@@ -63,7 +72,7 @@ PowerShell -ExecutionPolicy Bypass -File "niixdebloat.ps1"
 
 1. Set your **username and password** during the OOBE setup screen — this is the only prompt you will see.
 2. At first login, **run `niix-tweaks.ps1`** from your desktop as Administrator to finish the runtime tweaks.
-3. Windows activates itself automatically at first login (requires internet). If it fails, check `C:\Windows\Setup\Scripts\activation.log`.
+3. Activate Windows with your own valid license key (Settings → System → Activation).
 
 ---
 
