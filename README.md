@@ -22,8 +22,13 @@ PowerShell -ExecutionPolicy Bypass -File "niixdebloat.ps1"
 ```
 
 1. Place the script anywhere. If a `.iso` file is in the same folder it will be picked up automatically, otherwise a file browser opens.
-2. The script auto-selects **Windows 11 Pro for Workstations** if available, otherwise **Pro**, otherwise prompts you to choose.
-3. Everything runs unattended from there. Output ISO is saved as `win11_niix.iso` in the same folder as the source ISO.
+2. You'll be asked whether to inject this PC's drivers into the ISO — say yes if the
+   target machine is this same PC (or identical hardware) and you want networking,
+   storage and GPU drivers working immediately after install with nothing extra to
+   install. This exports only non-inbox (OEM/third-party) drivers via `dism /Export-Driver`
+   and injects them into the offline image via `dism /Add-Driver /Recurse`.
+3. The script auto-selects **Windows 11 Pro for Workstations** if available, otherwise **Pro**, otherwise prompts you to choose.
+4. Everything runs unattended from there. Output ISO is saved as `win11_niix.iso` in the same folder as the source ISO.
 
 ---
 
