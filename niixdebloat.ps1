@@ -85,17 +85,50 @@ Clear-Host
 Write-Banner ""
 Write-Banner "  +----------------------------------------------------------+"
 Write-Banner "  |                                                          |"
-Write-Banner "  |   NN   NN  IIIII  IIIII  XX   XX                         |"
-Write-Banner "  |   NNN  NN    I      I     XX XX                          |"
-Write-Banner "  |   NN N NN    I      I      XXX                           |"
-Write-Banner "  |   NN  NNN    I      I     XX XX                          |"
-Write-Banner "  |   NN   NN  IIIII  IIIII  XX   XX  DEBLOAT  v2.0          |"
+Write-Banner "  |   NN   NN  IIIII  IIIII  XX   XX                        |"
+Write-Banner "  |   NNN  NN    I      I     XX XX                         |"
+Write-Banner "  |   NN N NN    I      I      XXX                          |"
+Write-Banner "  |   NN  NNN    I      I     XX XX                         |"
+Write-Banner "  |   NN   NN  IIIII  IIIII  XX   XX  DEBLOAT  v2.0        |"
 Write-Banner "  |                                                          |"
 Write-Banner "  |      Windows 11 ISO Debloat & Privacy Hardener           |"
 Write-Banner "  |      autounattend.xml + niix-tweaks.ps1 embedded         |"
 Write-Banner "  |                                                          |"
 Write-Banner "  +----------------------------------------------------------+"
 Write-Banner ""
+
+# ===========================================================================
+#  STEP 0  --  DRIVER INJECTION PROMPT
+# ===========================================================================
+Write-Title "STEP 0 -- Driver options..."
+Write-Body "Add this PC's current drivers to the ISO? Useful if the target machine is"
+Write-Body "the same PC (or identical hardware) and you want networking/storage/GPU"
+Write-Body "drivers working immediately after install, with no separate driver install."
+Write-Host ""
+$driverChoice = Read-Host "  Inject this system's drivers into the ISO? [y/N]"
+$injectDrivers = $driverChoice -match '^[Yy]'
+if ($injectDrivers) {
+    Write-Success "Drivers will be exported from this PC and injected into the image."
+} else {
+    Write-Body "Skipping driver injection."
+}
+Write-Host ""
+
+$driverExportDir = $null
+if ($injectDrivers) {
+    Show-Progress "Exporting drivers from this PC..." 5
+    $driverExportDir = Join-Path $env:TEMP "niix_drivers_export"
+    if (Test-Path $driverExportDir) { Remove-Item $driverExportDir -Recurse -Force -ErrorAction SilentlyContinue }
+    New-Item -ItemType Directory -Path $driverExportDir -Force | Out-Null
+    & dism /English /Online /Export-Driver "/Destination:$driverExportDir" 2>&1 | Out-Null
+    $exportedCount = (Get-ChildItem -Path $driverExportDir -Filter '*.inf' -Recurse -ErrorAction SilentlyContinue).Count
+    if ($exportedCount -gt 0) {
+        Show-Progress "Exported $exportedCount driver package(s)." 8 -Done
+    } else {
+        Write-Body "No third-party drivers found to export (this PC may only use inbox drivers)."
+        $driverExportDir = $null
+    }
+}
 
 # ===========================================================================
 #  STEP 1  --  LOCATE ISO
@@ -250,6 +283,16 @@ Set-ItemProperty -Path $localWim -Name IsReadOnly -Value $false -ErrorAction Sil
 Show-Progress "Mounting image index $selectedIndex..." 30
 Mount-WindowsImage -ImagePath $localWim -Index $selectedIndex -Path $mountDir -ErrorAction Stop | Out-Null
 Show-Progress "Image mounted." 100 -Done
+
+# ===========================================================================
+#  STEP 4b  --  INJECT DRIVERS (if requested in STEP 0)
+# ===========================================================================
+if ($driverExportDir) {
+    Write-Title "STEP 4b -- Injecting this PC's drivers into the image..."
+    Show-Progress "Adding drivers to image (this can take a few minutes)..." 40
+    & dism /English "/image:$mountDir" /Add-Driver "/Driver:$driverExportDir" /Recurse /ForceUnsigned 2>&1 | Out-Null
+    Show-Progress "Drivers injected." 100 -Done
+}
 
 # ===========================================================================
 #  STEP 5  --  APPLY ALL MODIFICATIONS
@@ -831,6 +874,9 @@ Show-Progress "ISO built successfully." 100 -Done
 # ===========================================================================
 Show-Progress "Cleaning up temp files..." 50
 Remove-Item $workDir -Recurse -Force -ErrorAction SilentlyContinue
+if ($driverExportDir -and (Test-Path $driverExportDir)) {
+    Remove-Item $driverExportDir -Recurse -Force -ErrorAction SilentlyContinue
+}
 Show-Progress "Done." 100 -Done
 
 # ===========================================================================
@@ -852,8 +898,7 @@ Write-Banner "  +----------------------------------------------------------+"
 Write-Host ""
 Write-Host "  Applied:" -ForegroundColor $PINK
 $items = @(
-    "Removed 50+ AppX packages (Xbox, GameBar, Teams, Copilot...)",
-    "Deleted OneDrive binary from image",
+    "Removed 50+ AppX packages (Xbox, GameBar, Teams, Copilot...)",    "Deleted OneDrive binary from image",
     "Full telemetry / Copilot / Recall / AI lockdown",
     "Windows Backup + Recall removed via offline DISM (capability/feature)",
     "Xbox, GameBar, Edge update services disabled offline",
@@ -870,6 +915,9 @@ $items = @(
     "  Microsoft's Oct 13, 2026 auto-enable rollout",
     "No post-install reboot required -- all tweaks are live from first boot"
 )
+if ($driverExportDir) {
+    $items += "This PC's drivers exported and injected into the image"
+}
 foreach ($item in $items) {
     Write-Host "   * $item" -ForegroundColor $WHITE
 }
