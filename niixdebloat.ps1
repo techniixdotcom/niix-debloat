@@ -85,11 +85,11 @@ Clear-Host
 Write-Banner ""
 Write-Banner "  +----------------------------------------------------------+"
 Write-Banner "  |                                                          |"
-Write-Banner "  |   NN   NN  IIIII  IIIII  XX   XX                        |"
-Write-Banner "  |   NNN  NN    I      I     XX XX                         |"
-Write-Banner "  |   NN N NN    I      I      XXX                          |"
-Write-Banner "  |   NN  NNN    I      I     XX XX                         |"
-Write-Banner "  |   NN   NN  IIIII  IIIII  XX   XX  DEBLOAT  v2.0        |"
+Write-Banner "  |   NN   NN  IIIII  IIIII  XX   XX                         |"
+Write-Banner "  |   NNN  NN    I      I     XX XX                          |"
+Write-Banner "  |   NN N NN    I      I      XXX                           |"
+Write-Banner "  |   NN  NNN    I      I     XX XX                          |"
+Write-Banner "  |   NN   NN  IIIII  IIIII  XX   XX  DEBLOAT  v2.0          |"
 Write-Banner "  |                                                          |"
 Write-Banner "  |      Windows 11 ISO Debloat & Privacy Hardener           |"
 Write-Banner "  |      autounattend.xml + niix-tweaks.ps1 embedded         |"
@@ -868,7 +868,7 @@ $items = @(
     "  re-apply tweaks on an existing (non-ISO-built) Windows install",
     "Memory Integrity (HVCI/VBS) disabled offline -- won't be re-enabled by",
     "  Microsoft's Oct 13, 2026 auto-enable rollout",
-    "No post-install reboot required -- all tweaks are live from first boot",
+    "No post-install reboot required -- all tweaks are live from first boot"
 )
 foreach ($item in $items) {
     Write-Host "   * $item" -ForegroundColor $WHITE
