@@ -1,7 +1,3 @@
-![debloadimage](https://raw.githubusercontent.com/techniixdotcom/niix-debloat/refs/heads/main/niixdebloat.png)
-
-
-
 # niixdebloat
 
 Build a privacy-hardened, debloated, gaming-tuned Windows 11 install ISO from an official Microsoft ISO — no manual post-install cleanup required. Everything below is applied automatically during Windows Setup and at first logon.
@@ -33,6 +29,8 @@ All three files must stay together in the same folder — `niixdebloat.ps1` read
 4. Open Terminal (as admin): cd to the script folder and `powershell -ExecutionPolicy Bypass -File .\niixdebloat.ps1`
 5. Wait for it to finish — it mounts the image, applies every tweak listed below directly into the offline registry hives, bakes in the answer file, and builds a new `.iso`.
 6. Boot from the resulting ISO (see below) and install Windows normally — no further input needed beyond the screens Windows Setup still asks interactively (language/keyboard, disk partitioning, Windows edition, and your local account name/password).
+
+![debloadimage](https://raw.githubusercontent.com/techniixdotcom/niix-debloat/refs/heads/main/niixdebloat.png)
 
 ## Booting the ISO
 
