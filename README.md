@@ -1,3 +1,7 @@
+![debloadimage]([http://url/to/img.png](https://raw.githubusercontent.com/techniixdotcom/niix-debloat/refs/heads/main/niixdebloat.png))
+
+
+
 # niixdebloat
 
 Build a privacy-hardened, debloated, gaming-tuned Windows 11 install ISO from an official Microsoft ISO — no manual post-install cleanup required. Everything below is applied automatically during Windows Setup and at first logon.
