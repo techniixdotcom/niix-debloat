@@ -1,4 +1,4 @@
-![debloadimage]([http://url/to/img.png](https://raw.githubusercontent.com/techniixdotcom/niix-debloat/refs/heads/main/niixdebloat.png))
+![debloadimage](https://raw.githubusercontent.com/techniixdotcom/niix-debloat/refs/heads/main/niixdebloat.png)
 
 
 
