@@ -18,6 +18,18 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 # (harmless no-op if it doesn't exist, e.g. when double-clicked manually)
 Unregister-ScheduledTask -TaskName 'NiixTweaksAutoRun' -Confirm:$false -ErrorAction SilentlyContinue
 
+# ---- Fix the execution policy permanently, once, so this never blocks a
+# manual re-run of this (or any other local) script again. RemoteSigned still
+# requires downloaded/remote scripts to be signed -- it only stops blocking
+# scripts that already exist locally on this machine, which is what the
+# default "Restricted" policy was doing to you just now.
+try {
+    Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope LocalMachine -Force -ErrorAction Stop
+    Write-Host "  [OK] Execution policy set to RemoteSigned (local scripts will always run from now on)" -ForegroundColor Cyan
+} catch {
+    Write-Host "  [WARN] Set-ExecutionPolicy: $_" -ForegroundColor Yellow
+}
+
 # ---- Full transcript log, saved to this user's Documents for troubleshooting ----
 $logDir = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'NiixDebloat-Logs'
 New-Item -ItemType Directory -Path $logDir -Force -ErrorAction SilentlyContinue | Out-Null
