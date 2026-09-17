@@ -26,7 +26,7 @@ All three files must stay together in the same folder — `niixdebloat.ps1` read
 1. Download an official Windows 11 ISO from Microsoft.
 2. Put `niixdebloat.ps1`, `unattend.xml`, and `niix-tweaks.ps1` in the same folder.
 3. *(Optional)* Drop a `wallpaper.jpg`, `wallpaper.jpeg`, or `wallpaper.png` into that same folder to use it as the default desktop background. Skip this and Windows keeps its normal default wallpaper.
-4. Open Terminal (as admin): powershell -ExecutionPolicy Bypass -File .\niixdebloat.ps1
+4. Open Terminal (as admin): cd to the script folder and (`powershell -ExecutionPolicy Bypass -File .\niixdebloat.ps1`)
 5. Wait for it to finish — it mounts the image, applies every tweak listed below directly into the offline registry hives, bakes in the answer file, and builds a new `.iso`.
 6. Boot from the resulting ISO (see below) and install Windows normally — no further input needed beyond the screens Windows Setup still asks interactively (language/keyboard, disk partitioning, Windows edition, and your local account name/password).
 
