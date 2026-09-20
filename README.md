@@ -70,15 +70,16 @@ Edge browser is removed and blocked from reinstalling. **WebView2 Runtime is del
 
 ### Privacy & telemetry
 - Full diagnostic telemetry disabled (`AllowTelemetry=0`), advertising ID disabled, activity feed/timeline disabled, tailored experiences disabled
-- Location services, background app access, and cross-device clipboard sync disabled
+- Cross-device clipboard sync disabled; apps' access to system **diagnostic info** denied
+- Location services and per-app permissions (camera, microphone, location, background apps, etc.) are **left user-controlled in Settings**, not force-disabled — so your apps keep working and Mobile Hotspot is unaffected. Telemetry is already off, so location no longer leaks to Microsoft regardless.
 - Consumer features, sponsored Start/lock-screen content, and all the "tips & suggestions" toasts disabled
 - Defender's automatic cloud sample submission turned off (real-time protection itself is left fully on)
 - Clipboard "Suggested Actions" (the popup that appears when you copy a phone number/date) disabled
-- Telemetry-related services disabled: `DiagTrack`, `dmwappushservice`, `WerSvc`, `RemoteRegistry`, `RetailDemo`, `PcaSvc`, and others
+- Telemetry-related services disabled: `DiagTrack`, `dmwappushservice`, `WerSvc`, `RemoteRegistry`, `RetailDemo`, and other pure-telemetry/bloat services. App-critical services (`DPS`/troubleshooters, `PcaSvc`/app-compat, `lfsvc`/location, `PhoneSvc`, `MapsBroker`, `SysMain`, `TrkWks`) are **left enabled** so apps and built-in diagnostics work
 - BitLocker auto-encryption disabled
 
 ### Copilot, Recall & AI
-Windows Copilot, Recall, and the newer on-device AI data-analysis/snapshot features are all disabled via policy, and the Recall optional feature is removed outright if present.
+Windows Copilot, Recall, and the newer on-device AI data-analysis/snapshot features are all disabled via policy (`TurnOffWindowsCopilot`, `DisableAIDataAnalysis`, `TurnOffSavingSnapshots`). Recall takes no snapshots and does no AI analysis. The Recall **component is deliberately left in place, not removed** — on Windows 11 24H2, removing it also breaks the modern File Explorer UI, so policy-disabling is used instead to keep Explorer intact while Recall stays off.
 
 ### OneDrive
 Fully uninstalled, and blocked from reinstalling or defaulting your folders to it.
@@ -92,13 +93,21 @@ Dark mode (system + apps), transparency effects **on**, classic accent color, cu
 ### Windows Update
 Suppressed only during OOBE (so it doesn't nag mid-setup) and fully re-enabled after — the scheduled-task folders that actually drive WU's background scanning are explicitly *not* touched, since deleting them (as earlier debloat scripts often do) permanently breaks Windows Update.
 
-### Gaming performance & power (this build)
+### Gaming performance & power (auto-detects desktop vs laptop)
+The post-install script detects whether the machine is a **laptop** (has a battery) or a **desktop** and adjusts the power tweaks accordingly, so this one build is safe on both.
+
+Applied on **both** desktop and laptop (latency/gaming, battery-safe):
 - Reserved Storage disabled (reclaims ~7GB)
-- Hibernation disabled (reclaims disk space equal to installed RAM; also turns off Fast Startup)
 - NTFS last-access timestamp updates disabled (fewer background disk writes)
 - MMCSS network/multimedia throttling disabled, Games task priority raised (standard low-latency gaming tweak)
+- Game Mode on, Hardware-Accelerated GPU Scheduling on, GameDVR/Game Bar overlay off, mouse acceleration off, fullscreen optimizations off (baked in offline)
+
+Applied on **desktop only** (skipped on laptops to preserve battery/mobility):
+- Hibernation disabled (also turns off Fast Startup)
 - USB selective suspend disabled (stops peripherals power-cycling when briefly idle)
 - Power plan set to **High performance**
+
+On a **laptop**, hibernation/sleep, USB power management and the battery-aware Balanced/OEM power plan are left intact. For a gaming session, plug in and select a higher-performance plan (or your vendor's performance mode) manually.
 
 ### Miscellaneous
 Long path support enabled, Sticky Keys prompt disabled, SmartScreen disabled, password expiration removed, boot menu timeout set to 0, boot timeout, GameDVR/Game Bar overlay disabled.
@@ -107,7 +116,7 @@ Long path support enabled, Sticky Keys prompt disabled, SmartScreen disabled, pa
 
 - This build bypasses the TPM 2.0 / Secure Boot / RAM requirement checks (`LabConfig` registry keys) — standard practice for installing Windows 11 on unsupported or borderline hardware, but worth knowing it's happening.
 - Language/keyboard, disk partitioning, Windows edition selection, and your local account name/password are still asked interactively during Setup — this answer file automates *privacy, telemetry, and OOBE noise*, not the core install decisions.
-- The **High performance power plan + hibernation-off + USB-suspend-off** trio in this build assumes a desktop with no battery to manage. If you ever reuse this on a laptop, remove or adjust the Section 16 block in `niix-tweaks.ps1` first.
+- The **High performance power plan + hibernation-off + USB-suspend-off** trio is applied on desktops only. `niix-tweaks.ps1` auto-detects a battery/laptop chassis and skips those three, keeping sleep/hibernate, USB power management and the battery-aware power plan — so the same build is safe on both desktops and laptops with no manual edit.
 - Disabling Defender's cloud sample submission is a deliberate privacy/protection trade-off — real-time protection and local signature detection are unaffected, you just lose automatic cloud lookups on brand-new/unknown files.
 - If anything doesn't apply as expected, check `Documents\NiixDebloat-Logs` (or `C:\Users\Public\Documents\NiixDebloat-Logs`) after first logon — every install phase writes a full log there.
 

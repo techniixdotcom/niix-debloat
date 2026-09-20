@@ -159,6 +159,21 @@ function Remove-AppXByName {
     } catch {}
 }
 
+# ---- Detect chassis: laptop (battery-powered) vs desktop ----
+# Drives the power section below so battery-dependent tweaks (hibernation off,
+# USB selective suspend off, High-performance plan) are applied on desktops
+# only, while laptops keep sleep/hibernate, USB power management and the
+# battery-aware Balanced plan. The gaming/latency tweaks apply to both.
+$script:IsLaptop = $false
+try {
+    if (Get-CimInstance -ClassName Win32_Battery -ErrorAction SilentlyContinue) {
+        $script:IsLaptop = $true
+    } else {
+        $chassis = (Get-CimInstance -ClassName Win32_SystemEnclosure -ErrorAction SilentlyContinue).ChassisTypes
+        if ($chassis | Where-Object { $_ -in 8,9,10,11,12,14,18,21,30,31,32 }) { $script:IsLaptop = $true }
+    }
+} catch { }
+
 Clear-Host
 Write-Host ""
 Write-Host "  +----------------------------------------------------------+" -ForegroundColor $C
@@ -328,11 +343,23 @@ Write-Ok "Xbox and GameBar disabled"
 # ============================================================
 Write-Title "5. Disabling privacy-invasive services..."
 
-@('DiagTrack','dmwappushservice','SysMain','RemoteRegistry','WerSvc','DPS',
-  'MapsBroker','lfsvc','TrkWks','WMPNetworkSvc','WpcMonSvc','wisvc',
-  'RetailDemo','PhoneSvc','PcaSvc') | ForEach-Object { Disable-Svc $_ }
+# Only genuine telemetry/tracking/bloat services are disabled here. Services
+# that other apps and features depend on are deliberately LEFT ENABLED so your
+# apps keep working:
+#   DPS      - Diagnostic Policy Service (all Windows troubleshooters + the
+#              Network troubleshooter you'd use for Mobile Hotspot)
+#   PcaSvc   - Program Compatibility Assistant (breaks app-compat + throws
+#              pcasvc.dll errors on 24H2 if disabled)
+#   lfsvc    - Geolocation (auto time-zone, Find My Device, weather; can also
+#              affect the Wi-Fi/SoftAP stack behind Mobile Hotspot)
+#   PhoneSvc - telephony state (Phone Link, cellular on laptops)
+#   MapsBroker - Windows Maps platform used by third-party apps
+#   SysMain  - memory/prefetch (Microsoft recommends leaving it on)
+#   TrkWks   - link tracking (resolves shortcuts across drives)
+@('DiagTrack','dmwappushservice','RemoteRegistry','WerSvc',
+  'WMPNetworkSvc','WpcMonSvc','wisvc','RetailDemo') | ForEach-Object { Disable-Svc $_ }
 
-Write-Ok "Privacy-invasive services disabled"
+Write-Ok "Telemetry/tracking services disabled (app-critical services left enabled)"
 
 # ============================================================
 #  6. TELEMETRY & DATA COLLECTION
@@ -349,8 +376,11 @@ Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AdvertisingInfo'             
 Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System'                        'EnableActivityFeed'                          'DWord' 0
 Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System'                        'PublishUserActivities'                       'DWord' 0
 Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System'                        'UploadUserActivities'                        'DWord' 0
-Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\LocationAndSensors'            'DisableLocation'                             'DWord' 1
-Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\LocationAndSensors'            'DisableLocationScripting'                    'DWord' 1
+# NOTE: Location is intentionally NOT hard-disabled by policy. Telemetry is
+# already off (AllowTelemetry=0), and forcing location off breaks auto
+# time-zone, Find My Device and weather, and can interfere with the Wi-Fi/
+# SoftAP stack behind Mobile Hotspot. Location stays user-controllable in
+# Settings > Privacy & security > Location.
 Set-Reg 'HKCU:\Software\Microsoft\InputPersonalization'                           'RestrictImplicitInkCollection'               'DWord' 1
 Set-Reg 'HKCU:\Software\Microsoft\InputPersonalization'                           'RestrictImplicitTextCollection'              'DWord' 1
 Set-Reg 'HKCU:\Software\Microsoft\InputPersonalization\TrainedDataStore'          'HarvestContacts'                             'DWord' 0
@@ -359,13 +389,12 @@ Set-Reg 'HKCU:\Software\Microsoft\Speech_OneCore\Settings\OnlineSpeechPrivacy'  
 Set-Reg 'HKCU:\Software\Microsoft\Input\TIPC'                                     'Enabled'                                     'DWord' 0
 Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Error Reporting'       'Disabled'                                    'DWord' 1
 
+# Deny apps access to system DIAGNOSTIC INFO only (a telemetry vector with no
+# legitimate app need). Camera / microphone / location / contacts / etc. are
+# left USER-CONTROLLED in Settings rather than force-denied by policy, so apps
+# that need them (Discord, OBS, Zoom, camera apps, etc.) keep working.
 $ap = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy'
-@('LetAppsGetDiagnosticInfo','LetAppsRunInBackground','LetAppsAccessLocation',
-  'LetAppsAccessCamera','LetAppsAccessMicrophone','LetAppsAccessContacts',
-  'LetAppsAccessCalendar','LetAppsAccessCallHistory','LetAppsAccessEmail',
-  'LetAppsAccessMessaging','LetAppsAccessMotion','LetAppsAccessAccountInfo',
-  'LetAppsAccessTasks','LetAppsAccessBackgroundSpatialPerception') |
-  ForEach-Object { Set-Reg $ap $_ 'DWord' 2 }
+Set-Reg $ap 'LetAppsGetDiagnosticInfo' 'DWord' 2
 
 Write-Ok "Telemetry and privacy tweaks applied"
 
@@ -401,13 +430,13 @@ Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI'      'TurnOffSavin
 Set-Reg 'HKCU:\Software\Policies\Microsoft\Windows\Explorer'        'DisableSearchBoxSuggestions' 'DWord' 1
 Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer'        'DisableSearchBoxSuggestions' 'DWord' 1
 
-try {
-    $recall = Get-WindowsOptionalFeature -Online -ErrorAction SilentlyContinue |
-              Where-Object { $_.FeatureName -like 'Recall' -and $_.State -eq 'Enabled' }
-    if ($recall) { Disable-WindowsOptionalFeature -Online -FeatureName 'Recall' -Remove -NoRestart -ErrorAction SilentlyContinue }
-} catch {}
+# Recall is fully neutralized by the policy keys above (DisableAIDataAnalysis +
+# TurnOffSavingSnapshots): it takes no snapshots and performs no AI analysis.
+# We deliberately do NOT remove the Recall optional feature -- on Windows 11
+# 24H2, removing the component also breaks the modern File Explorer UI. Policy-
+# disabling keeps Explorer intact while Recall stays off.
 
-Write-Ok "Copilot, Recall and AI features disabled"
+Write-Ok "Copilot, Recall and AI features disabled (Recall neutralized by policy, not removed)"
 
 # ============================================================
 #  9. TASKBAR / UI
@@ -617,9 +646,15 @@ Set-Reg 'HKCU:\Software\Microsoft\Windows\CurrentVersion\SmartActionPlatform\Sma
 Write-Ok "Privacy extras applied (Defender sample submission, clipboard cloud sync/suggestions)"
 
 # ============================================================
-#  16. PERFORMANCE & POWER (gaming desktop)
+#  16. PERFORMANCE & POWER (auto: desktop vs laptop)
 # ============================================================
-Write-Title "16. Performance and power tweaks for a gaming desktop..."
+if ($script:IsLaptop) {
+    Write-Title "16. Performance tweaks (laptop detected -- battery-safe profile)..."
+} else {
+    Write-Title "16. Performance and power tweaks (desktop detected)..."
+}
+
+# --- Tweaks that are safe and beneficial on BOTH desktops and laptops --------
 
 # Reclaim the ~7GB Windows sets aside for itself ("Reserved Storage"). Small
 # risk: on a nearly-full drive, a future cumulative update could occasionally
@@ -629,18 +664,8 @@ try {
     Write-Ok "Reserved Storage disabled (~7GB reclaimed)"
 } catch { Write-Warn "Reserved Storage: $_" }
 
-# Turn off hibernation entirely -- reclaims disk space equal to your installed
-# RAM (hiberfil.sys). This also disables Fast Startup as a side effect (Fast
-# Startup relies on hibernation); on an SSD gaming rig that isn't a real loss,
-# full cold boots are already fast. Skip this tweak if you rely on Sleep ->
-# Hibernate for long power-off periods.
-try {
-    powercfg /hibernate off 2>&1 | Out-Null
-    Write-Ok "Hibernation disabled, Fast Startup off (disk space reclaimed)"
-} catch { Write-Warn "Disabling hibernation: $_" }
-
 # Stop Windows updating NTFS "last accessed" timestamps on every file touch --
-# a small, free reduction in disk writes with no real downside for a desktop.
+# a small, free reduction in disk writes with no real downside.
 try {
     fsutil behavior set disablelastaccess 1 | Out-Null
     Write-Ok "NTFS last-access timestamps disabled"
@@ -648,7 +673,7 @@ try {
 
 # MMCSS network/multimedia scheduling: stop Windows throttling background
 # network and audio processing in favor of foreground apps. Standard,
-# well-known low-latency tweak for gaming/streaming rigs.
+# well-known low-latency tweak for gaming/streaming.
 $mmcss = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile'
 Set-Reg $mmcss                              'SystemResponsiveness'   'DWord' 0
 Set-Reg $mmcss                              'NetworkThrottlingIndex' 'DWord' 0xffffffff
@@ -658,26 +683,47 @@ Set-Reg $mmcssGames 'Scheduling Category'   'String' 'High'
 Set-Reg $mmcssGames 'SFIO Priority'         'String' 'High'
 Write-Ok "Network throttling disabled, Games task priority raised"
 
-# USB selective suspend off -- stops mice/audio interfaces/controllers from
-# power-cycling when briefly idle (fixes "input wakes up a beat late").
-# Irrelevant for battery since this is a desktop.
-try {
-    $activeScheme = (powercfg /getactivescheme) -replace '.*: ([a-f0-9-]+).*','$1'
-    powercfg /setacvalueindex $activeScheme 2a737441-1930-4402-8d77-b2bebba308a3 48e6b7a6-50f5-4782-a5d4-53bb8f07e226 0 2>&1 | Out-Null
-    powercfg /setactive $activeScheme 2>&1 | Out-Null
-    Write-Ok "USB selective suspend disabled"
-} catch { Write-Warn "USB selective suspend: $_" }
+if (-not $script:IsLaptop) {
+    # --- DESKTOP-ONLY: battery management is irrelevant, so go aggressive ----
 
-# Power plan -> High performance. On a gaming desktop (no battery to manage)
-# this removes CPU park/parking and frequency-scaling latency that the
-# Balanced plan introduces to save power you don't need to save here.
-try {
-    $highPerfGuid = '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c'
-    powercfg /setactive $highPerfGuid 2>&1 | Out-Null
-    Write-Ok "Power plan set to High performance"
-} catch { Write-Warn "Setting High performance power plan: $_" }
+    # Turn off hibernation entirely -- reclaims disk space equal to installed
+    # RAM (hiberfil.sys). Also disables Fast Startup (which relies on it); on an
+    # SSD desktop that's no real loss.
+    try {
+        powercfg /hibernate off 2>&1 | Out-Null
+        Write-Ok "Hibernation disabled, Fast Startup off (disk space reclaimed)"
+    } catch { Write-Warn "Disabling hibernation: $_" }
 
-Write-Ok "Gaming desktop performance/power tweaks done"
+    # USB selective suspend off -- stops mice/audio interfaces/controllers from
+    # power-cycling when briefly idle. No battery to protect on a desktop.
+    try {
+        $activeScheme = (powercfg /getactivescheme) -replace '.*: ([a-f0-9-]+).*','$1'
+        powercfg /setacvalueindex $activeScheme 2a737441-1930-4402-8d77-b2bebba308a3 48e6b7a6-50f5-4782-a5d4-53bb8f07e226 0 2>&1 | Out-Null
+        powercfg /setactive $activeScheme 2>&1 | Out-Null
+        Write-Ok "USB selective suspend disabled"
+    } catch { Write-Warn "USB selective suspend: $_" }
+
+    # Power plan -> High performance. On a desktop this removes CPU parking and
+    # frequency-scaling latency the Balanced plan adds to save power you don't
+    # need to save here.
+    try {
+        $highPerfGuid = '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c'
+        powercfg /setactive $highPerfGuid 2>&1 | Out-Null
+        Write-Ok "Power plan set to High performance"
+    } catch { Write-Warn "Setting High performance power plan: $_" }
+
+    Write-Ok "Desktop performance/power tweaks done"
+} else {
+    # --- LAPTOP: preserve battery life and mobility -------------------------
+    # Hibernation / Fast Startup: LEFT ON (you want Sleep -> Hibernate).
+    # USB selective suspend: LEFT ON (saves battery).
+    # Power plan: LEFT on the battery-aware Balanced/OEM plan. For gaming
+    # sessions, plug in and pick a higher-performance plan manually, or use
+    # your laptop vendor's performance mode -- forcing High performance
+    # system-wide would drain the battery even on the desktop.
+    Write-Body "Laptop detected: hibernation, USB power management and the battery-aware power plan left intact."
+    Write-Ok "Laptop-safe performance tweaks done (gaming/latency tweaks applied, battery settings preserved)"
+}
 
 # ============================================================
 #  DONE

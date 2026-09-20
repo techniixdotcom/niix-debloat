@@ -368,7 +368,11 @@ foreach ($cap in $allCaps) {
         & dism /English "/image:$mountDir" /Remove-Capability "/CapabilityName:$cap" 2>&1 | Out-Null
     }
 }
-& dism /English "/image:$mountDir" /Disable-Feature "/FeatureName:Recall" /Remove 2>&1 | Out-Null
+# Recall is neutralized by policy (DisableAIDataAnalysis + TurnOffSavingSnapshots,
+# written to the offline SOFTWARE hive in step 5g). We do NOT remove the Recall
+# optional feature: on Windows 11 24H2, removing the component also breaks the
+# modern File Explorer UI. Policy-disabling keeps Explorer intact while Recall
+# stays off.
 
 # -- 5b. Remove OneDrive -------------------------------------------------------
 Show-Progress "Removing OneDrive..." 12
@@ -385,7 +389,9 @@ $ep = @(
     "$mountDir\Program Files (x86)\Microsoft\Temp",
     "$mountDir\Windows\SystemApps\Microsoft.MicrosoftEdge_8wekyb3d8bbwe",
     "$mountDir\Windows\SystemApps\Microsoft.MicrosoftEdgeDevToolsClient_8wekyb3d8bbwe",
-    "$mountDir\Windows\SystemApps\Microsoft.Win32WebViewHost_cw5n1h2txyewy",
+    # Microsoft.Win32WebViewHost is the system "Desktop App Web Viewer" -- it is
+    # NOT the Edge browser and some apps/system UI render web content through it,
+    # so it is intentionally left in place.
     "$mountDir\Windows\System32\MicrosoftEdgeCP.exe",
     "$mountDir\Windows\System32\MicrosoftEdgeSH.exe",
     "$mountDir\Users\Public\Desktop\Microsoft Edge.lnk",
@@ -476,14 +482,13 @@ Set-OfflineReg 'HKLM\zSYSTEM\ControlSet001\Services\dmwappushservice'           
 Set-OfflineReg 'HKLM\zSOFTWARE\Policies\Microsoft\Windows\System'                                   'EnableActivityFeed'                           'REG_DWORD' '0'
 Set-OfflineReg 'HKLM\zSOFTWARE\Policies\Microsoft\Windows\System'                                   'PublishUserActivities'                        'REG_DWORD' '0'
 Set-OfflineReg 'HKLM\zSOFTWARE\Policies\Microsoft\Windows\System'                                   'UploadUserActivities'                         'REG_DWORD' '0'
-Set-OfflineReg 'HKLM\zSOFTWARE\Policies\Microsoft\Windows\LocationAndSensors'                       'DisableLocation'                              'REG_DWORD' '1'
-Set-OfflineReg 'HKLM\zSOFTWARE\Policies\Microsoft\Windows\LocationAndSensors'                       'DisableLocationScripting'                     'REG_DWORD' '1'
-foreach ($k in @('LetAppsGetDiagnosticInfo','LetAppsRunInBackground','LetAppsAccessLocation',
-  'LetAppsAccessCamera','LetAppsAccessMicrophone','LetAppsAccessContacts',
-  'LetAppsAccessCalendar','LetAppsAccessCallHistory','LetAppsAccessEmail',
-  'LetAppsAccessMessaging','LetAppsAccessMotion','LetAppsAccessAccountInfo','LetAppsAccessTasks')) {
-    Set-OfflineReg 'HKLM\zSOFTWARE\Policies\Microsoft\Windows\AppPrivacy' $k 'REG_DWORD' '2'
-}
+# Location is intentionally NOT hard-disabled (telemetry is already off, and
+# forcing it off breaks auto time-zone / Find My Device / weather and can
+# interfere with the Wi-Fi/SoftAP stack behind Mobile Hotspot). It stays
+# user-controllable in Settings. Only apps' access to system DIAGNOSTIC INFO is
+# denied (a telemetry vector); camera/mic/location/etc. stay user-controlled so
+# apps keep working.
+Set-OfflineReg 'HKLM\zSOFTWARE\Policies\Microsoft\Windows\AppPrivacy' 'LetAppsGetDiagnosticInfo' 'REG_DWORD' '2'
 
 # -- 5g. Copilot / AI / Bing / Recall -----------------------------------------
 Show-Progress "Disabling Copilot, Recall, Bing and AI features..." 45
@@ -564,7 +569,11 @@ Set-OfflineReg 'HKLM\zSOFTWARE\Microsoft\Windows NT\CurrentVersion\PasswordRecov
 
 # -- 5n. Privacy-invasive services --------------------------------------------
 Show-Progress "Disabling privacy-invasive services..." 70
-foreach ($s in @('DiagTrack','SysMain','RemoteRegistry','DPS','WerSvc','SDRSVC','wbengine')) {
+# Telemetry/backup services only. DPS (Diagnostic Policy Service -> all Windows
+# troubleshooters incl. the Network troubleshooter) and SysMain (memory/prefetch,
+# Microsoft recommends leaving on) are deliberately NOT disabled, so apps and
+# built-in diagnostics keep working.
+foreach ($s in @('DiagTrack','RemoteRegistry','WerSvc','SDRSVC','wbengine')) {
     Set-OfflineReg "HKLM\zSYSTEM\ControlSet001\Services\$s" 'Start' 'REG_DWORD' '4'
 }
 Set-OfflineReg 'HKLM\zSOFTWARE\Policies\Microsoft\Windows\Windows Error Reporting' 'Disabled' 'REG_DWORD' '1'
@@ -748,13 +757,20 @@ if ($customWall) {
 
     & reg unload HKLM\zNTUSERWALL 2>&1 | Out-Null
 
-    # Write PersonalizationCSP into the already-mounted zSOFTWARE hive (5c loaded it)
+    # Write PersonalizationCSP into the offline SOFTWARE hive. NOTE: the hive
+    # loaded in 5c was already unloaded in 5q, so we must load it again here --
+    # otherwise these keys would land in the *build machine's* live registry
+    # under a bogus HKLM\zSOFTWARE key and never reach the image.
+    $softwareHive = Join-Path $mountDir 'Windows\System32\config\SOFTWARE'
+    & reg load HKLM\zSOFTWARE $softwareHive 2>&1 | Out-Null
     $_pc = 'HKLM\zSOFTWARE\Microsoft\Windows\CurrentVersion\PersonalizationCSP'
     & reg add $_pc /v DesktopImagePath      /t REG_SZ    /d $_wp /f 2>&1 | Out-Null
     & reg add $_pc /v DesktopImageStatus    /t REG_DWORD /d 1    /f 2>&1 | Out-Null
     & reg add $_pc /v DesktopImageUrl       /t REG_SZ    /d $_wp /f 2>&1 | Out-Null
     & reg add $_pc /v LockScreenImagePath   /t REG_SZ    /d $_wp /f 2>&1 | Out-Null
     & reg add $_pc /v LockScreenImageStatus /t REG_DWORD /d 1    /f 2>&1 | Out-Null
+    [gc]::Collect(); Start-Sleep -Milliseconds 300
+    & reg unload HKLM\zSOFTWARE 2>&1 | Out-Null
 
     Show-Progress "Wallpaper embedded and set as default." 98 -Done
 } else {
@@ -874,7 +890,7 @@ Show-Progress "Running oscdimg..." 5
 
 $bootData = "2#p0,e,b`"$isoContents\boot\etfsboot.com`"" +
             "#pEF,e,b`"$isoContents\efi\microsoft\boot\efisys.bin`""
-$oscdimgArgs = "-m -o -u2 -udfver102 `-bootdata:$bootData -lNIIX_WIN11 `"$isoContents`" `"$outputISO`""
+$oscdimgArgs = "-m -o -u2 -udfver102 -bootdata:$bootData -lNIIX_WIN11 `"$isoContents`" `"$outputISO`""
 
 $psi = [System.Diagnostics.ProcessStartInfo]::new()
 $psi.FileName               = $oscdimg
