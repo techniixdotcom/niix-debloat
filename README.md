@@ -16,8 +16,9 @@ All three files must stay together in the same folder — `niixdebloat.ps1` read
 
 ## Requirements
 
-- Windows 10/11 with PowerShell (run `niixdebloat.ps1` **as Administrator**)
-- An official Windows 11 ISO from Microsoft
+- Windows 10/11 x64 build machine with the built-in Windows PowerShell 5.1 (the script relaunches itself as Administrator and in 5.1 automatically if started from a normal window or from PowerShell 7)
+- An official Windows 11 **x64** ISO from Microsoft (ISOs containing either `install.wim` or `install.esd` are supported; ARM64 is not)
+- At least 25 GB free on the drive that holds `%TEMP%`
 - `oscdimg.exe` (from the Windows ADK Deployment Tools, or installed automatically via `winget` if missing) — used to build the final ISO
 - Internet access on the build machine (for `oscdimg` if not already installed)
 
@@ -26,8 +27,9 @@ All three files must stay together in the same folder — `niixdebloat.ps1` read
 1. Download an official Windows 11 ISO from Microsoft.
 2. Put `niixdebloat.ps1`, `unattend.xml`, and `niix-tweaks.ps1` in the same folder.
 3. *(Optional)* Drop a `wallpaper.jpg`, `wallpaper.jpeg`, or `wallpaper.png` into that same folder to use it as the default desktop background. Skip this and Windows keeps its normal default wallpaper.
-4. Open Terminal (as admin): cd to the script folder and `powershell -ExecutionPolicy Bypass -File .\niixdebloat.ps1`
-5. Wait for it to finish — it mounts the image, applies every tweak listed below directly into the offline registry hives, bakes in the answer file, and builds a new `.iso`.
+   *(Optional)* Drop any `.exe` files (for example a browser installer, since Edge is removed) into that same folder. Every `.exe` there is copied into the ISO and appears on the desktop of every user from the first boot (`C:\Users\Public\Desktop`). The build prints the digital-signature status of each file and warns about unsigned ones — because SmartScreen is off in this build, only include installers from sources you trust.
+4. Open Terminal, `cd` to the script folder and run `powershell -ExecutionPolicy Bypass -File .\niixdebloat.ps1` (accept the UAC prompt if one appears).
+5. Wait for it to finish — it mounts the image, applies every tweak listed below directly into the offline registry hives, bakes in the answer file, and builds `win11_niix.iso` next to the source ISO. If anything fails, the mounted image, the ISO and all temp files are cleaned up automatically, so you can simply run it again.
 6. Boot from the resulting ISO (see below) and install Windows normally — no further input needed beyond the screens Windows Setup still asks interactively (language/keyboard, disk partitioning, Windows edition, and your local account name/password).
 
 ![debloadimage](https://raw.githubusercontent.com/techniixdotcom/niix-debloat/refs/heads/main/niixdebloat.png)
@@ -63,17 +65,18 @@ Ventoy does **not** read an ISO's own internal `autounattend.xml` — it needs t
 ## What this script removes, disables, and changes
 
 ### Bloatware removed
-Xbox apps (Game Bar, Xbox app, Xbox Identity/Speech-to-Text overlays), Bing News/Search/Weather, Copilot, Cross Device Experience, Get Help, Get Started, 3D Viewer, Office Hub, Solitaire Collection, Sticky Notes, Mixed Reality Portal, Paint, OneNote, Office push notifications, the new Outlook app, People, Power Automate Desktop, Skype, Start Experiences, To Do, Wallet, Dev Home, Teams (both variants), Alarms, Camera, Mail & Calendar, Feedback Hub, Maps, Sound Recorder, Groove Music/Movies & TV, Clipchamp, and the Windows Backup capability.
+Xbox apps (Game Bar, Xbox app, Xbox Identity/Speech-to-Text overlays), Bing News/Search/Weather, Copilot, Cross Device Experience, Get Help, Get Started, 3D Viewer, Office Hub, Solitaire Collection, Sticky Notes, Mixed Reality Portal, Paint 3D, OneNote, Office push notifications, the new Outlook app, People, Power Automate Desktop, Skype, Start Experiences, To Do, Wallet, Dev Home, Teams (both variants), Alarms, Camera, Mail & Calendar, Feedback Hub, Maps, Sound Recorder, Groove Music/Movies & TV, Clipchamp, Microsoft Family, Quick Assist, OEM Dolby/Intel management apps, and the Windows Backup capability.
 
 ### Microsoft Edge & WebView2
 Edge browser is removed and blocked from reinstalling. **WebView2 Runtime is deliberately kept working** (with explicit policy overrides) since many third-party apps — Stremio, WhatsApp Desktop, and most Electron/webview-based apps — depend on it even with Edge itself gone.
 
 ### Privacy & telemetry
-- Full diagnostic telemetry disabled (`AllowTelemetry=0`), advertising ID disabled, activity feed/timeline disabled, tailored experiences disabled
+- Diagnostic data set to the lowest level the edition allows (`AllowTelemetry=0` — honoured as "Security" on Enterprise/Education, treated as "Required" on Home/Pro), advertising ID disabled, activity feed/timeline disabled, tailored experiences disabled
+- Telemetry scheduled tasks (Compatibility Appraiser, CEIP, Feedback/SIUF, Error Reporting queue, disk diagnostic collector) **disabled, not deleted** — deleting task files leaves corrupt entries in Task Scheduler
 - Cross-device clipboard sync disabled; apps' access to system **diagnostic info** denied
 - Location services and per-app permissions (camera, microphone, location, background apps, etc.) are **left user-controlled in Settings**, not force-disabled — so your apps keep working and Mobile Hotspot is unaffected. Telemetry is already off, so location no longer leaks to Microsoft regardless.
 - Consumer features, sponsored Start/lock-screen content, and all the "tips & suggestions" toasts disabled
-- Defender's automatic cloud sample submission turned off (real-time protection itself is left fully on)
+- Defender never uploads your files to Microsoft (`SubmitSamplesConsent=2`); real-time protection **and cloud-delivered protection** stay on
 - Clipboard "Suggested Actions" (the popup that appears when you copy a phone number/date) disabled
 - Telemetry-related services disabled: `DiagTrack`, `dmwappushservice`, `WerSvc`, `RemoteRegistry`, `RetailDemo`, and other pure-telemetry/bloat services. App-critical services (`DPS`/troubleshooters, `PcaSvc`/app-compat, `lfsvc`/location, `PhoneSvc`, `MapsBroker`, `SysMain`, `TrkWks`) are **left enabled** so apps and built-in diagnostics work
 - BitLocker auto-encryption disabled
@@ -91,7 +94,7 @@ Classic (Windows 10-style) right-click context menu, search box hidden, Widgets/
 Dark mode (system + apps), transparency effects **on**, classic accent color, custom wallpaper support.
 
 ### Windows Update
-Suppressed only during OOBE (so it doesn't nag mid-setup) and fully re-enabled after — the scheduled-task folders that actually drive WU's background scanning are explicitly *not* touched, since deleting them (as earlier debloat scripts often do) permanently breaks Windows Update.
+Only the Windows Update service (`wuauserv`) is paused during OOBE, and it is restored at first logon by both `FirstLogon.ps1` and `niix-tweaks.ps1`. Protected services (`WaaSMedicSvc`, `UsoSvc`) and WU's scheduled tasks are never touched, so Windows Update cannot end up permanently broken. After setup, updates download automatically, you choose when to install, there are no automatic restarts while you're signed in, and peer-to-peer delivery is off.
 
 ### Gaming performance & power (auto-detects desktop vs laptop)
 The post-install script detects whether the machine is a **laptop** (has a battery) or a **desktop** and adjusts the power tweaks accordingly, so this one build is safe on both.
@@ -110,14 +113,16 @@ Applied on **desktop only** (skipped on laptops to preserve battery/mobility):
 On a **laptop**, hibernation/sleep, USB power management and the battery-aware Balanced/OEM power plan are left intact. For a gaming session, plug in and select a higher-performance plan (or your vendor's performance mode) manually.
 
 ### Miscellaneous
-Long path support enabled, Sticky Keys prompt disabled, SmartScreen disabled, password expiration removed, boot menu timeout set to 0, boot timeout, GameDVR/Game Bar overlay disabled.
+Long path support enabled, Sticky Keys prompt disabled, SmartScreen disabled, password expiration removed, boot menu timeout set to 0 (single-OS machines only), GameDVR/Game Bar overlay disabled. A custom wallpaper, if supplied, is set as the *default* — you can still change it in Settings.
 
 ## Notes & caveats
 
 - This build bypasses the TPM 2.0 / Secure Boot / RAM requirement checks (`LabConfig` registry keys) — standard practice for installing Windows 11 on unsupported or borderline hardware, but worth knowing it's happening.
 - Language/keyboard, disk partitioning, Windows edition selection, and your local account name/password are still asked interactively during Setup — this answer file automates *privacy, telemetry, and OOBE noise*, not the core install decisions.
 - The **High performance power plan + hibernation-off + USB-suspend-off** trio is applied on desktops only. `niix-tweaks.ps1` auto-detects a battery/laptop chassis and skips those three, keeping sleep/hibernate, USB power management and the battery-aware power plan — so the same build is safe on both desktops and laptops with no manual edit.
-- Disabling Defender's cloud sample submission is a deliberate privacy/protection trade-off — real-time protection and local signature detection are unaffected, you just lose automatic cloud lookups on brand-new/unknown files.
+- **Security trade-offs you are opting into:** SmartScreen is off and Memory Integrity / VBS (Core Isolation) is off. Both are deliberate gaming-performance choices; turn them back on in *Windows Security* if the machine is used for anything sensitive.
+- Defender sample submission is off, but cloud-delivered protection is kept on, so brand-new malware is still checked against Microsoft's cloud by file hash/metadata.
+- Non-English Windows is supported: all permission and scheduled-task changes use well-known SIDs instead of localized group names.
 - If anything doesn't apply as expected, check `Documents\NiixDebloat-Logs` (or `C:\Users\Public\Documents\NiixDebloat-Logs`) after first logon — every install phase writes a full log there.
 
 ## License
