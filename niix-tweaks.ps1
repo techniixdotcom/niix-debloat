@@ -1,16 +1,23 @@
-#Requires -RunAsAdministrator
 <#
 .SYNOPSIS
     niix-tweaks.ps1 - Post-install privacy hardening, debloat and service tweaks
 .DESCRIPTION
     Run once on a fresh Windows 11 install. Removes Edge, Windows Backup,
     applies all privacy/service tweaks and dark theme correctly.
+    Runs under Windows PowerShell 5.1; relaunches itself elevated in 5.1 if
+    started without admin rights or from PowerShell 7.
 #>
 
-# ---- Self-elevate ----
-if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
-    ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Start-Process powershell -ArgumentList "-ExecutionPolicy Bypass -NoProfile -File `"$PSCommandPath`"" -Verb RunAs
+# ---- Self-elevate / force Windows PowerShell 5.1 (AppX cmdlets need it) ----
+$_isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $_isAdmin -or $PSVersionTable.PSEdition -eq 'Core') {
+    $_winPS   = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $_argList = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
+    if ($_isAdmin) {
+        Start-Process -FilePath $_winPS -ArgumentList $_argList -NoNewWindow -Wait
+    } else {
+        Start-Process -FilePath $_winPS -ArgumentList $_argList -Verb RunAs
+    }
     exit
 }
 
@@ -36,12 +43,12 @@ New-Item -ItemType Directory -Path $logDir -Force -ErrorAction SilentlyContinue 
 $logFile = Join-Path $logDir ("niix-tweaks_{0:yyyy-MM-dd_HH-mm-ss}.log" -f (Get-Date))
 try { Start-Transcript -Path $logFile -Force | Out-Null } catch { }
 
-$C = 'Cyan'; $G = 'Green'; $W = 'White'; $R = 'Red'
+$ClrCyan = 'Cyan'; $ClrGreen = 'Green'; $ClrWhite = 'White'; $ClrRed = 'Red'
 $warnings = [System.Collections.Generic.List[string]]::new()
 
-function Write-Title   { param($t) Write-Host "`n  $t" -ForegroundColor $G }
-function Write-Body    { param($t) Write-Host "  $t"   -ForegroundColor $W }
-function Write-Ok      { param($t) Write-Host "  [OK] $t" -ForegroundColor $C }
+function Write-Title   { param($t) Write-Host "`n  $t" -ForegroundColor $ClrGreen }
+function Write-Body    { param($t) Write-Host "  $t"   -ForegroundColor $ClrWhite }
+function Write-Ok      { param($t) Write-Host "  [OK] $t" -ForegroundColor $ClrCyan }
 function Write-Warn    { param($t) Write-Host "  [WARN] $t" -ForegroundColor Yellow; $script:warnings.Add($t) }
 
 function Set-Reg {
@@ -96,7 +103,13 @@ public class TokenPriv {
 
 function Set-RegOwned {
     param([string]$Path, [string]$Name, [string]$Type, $Value)
+    try {
+        if (-not (Test-Path $Path)) { New-Item -Path $Path -Force -ErrorAction Stop | Out-Null }
+        Set-ItemProperty -Path $Path -Name $Name -Type $Type -Value $Value -Force -ErrorAction Stop
+        return
+    } catch { }
     Enable-RegPrivileges
+    $adminSid = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
     try {
         $hive = $Path.Split(':\')[0]
         $sub  = $Path.Substring($Path.IndexOf(':\') + 2)
@@ -113,7 +126,7 @@ function Set-RegOwned {
         if ($key) {
             $acl = $key.GetAccessControl(
                 [System.Security.AccessControl.AccessControlSections]::None)
-            $acl.SetOwner([System.Security.Principal.NTAccount]'Administrators')
+            $acl.SetOwner($adminSid)
             $key.SetAccessControl($acl)
             $key.Close()
         }
@@ -124,7 +137,7 @@ function Set-RegOwned {
         if ($key2) {
             $acl2 = $key2.GetAccessControl()
             $rule = [System.Security.AccessControl.RegistryAccessRule]::new(
-                'Administrators',
+                $adminSid,
                 [System.Security.AccessControl.RegistryRights]::FullControl,
                 [System.Security.AccessControl.InheritanceFlags]::ContainerInherit,
                 [System.Security.AccessControl.PropagationFlags]::None,
@@ -137,14 +150,38 @@ function Set-RegOwned {
     Set-Reg $Path $Name $Type $Value
 }
 
+function Invoke-Quiet {
+    param([string]$FilePath, [string]$Arguments)
+    $psi = [System.Diagnostics.ProcessStartInfo]::new($FilePath, $Arguments)
+    $psi.UseShellExecute        = $false
+    $psi.CreateNoWindow         = $true
+    $psi.RedirectStandardInput  = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError  = $true
+    $p = [System.Diagnostics.Process]::Start($psi)
+    $p.StandardInput.Close()
+    $out = $p.StandardOutput.ReadToEndAsync()
+    $err = $p.StandardError.ReadToEndAsync()
+    $p.WaitForExit()
+    [pscustomobject]@{ ExitCode = $p.ExitCode; Output = $out.Result; Error = $err.Result }
+}
+
+function Grant-AdminFullControl {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    $recurse = if (Test-Path -LiteralPath $Path -PathType Container) { ' /R' } else { '' }
+    Invoke-Quiet 'takeown.exe' ("/F `"$Path`" /A$recurse") | Out-Null
+    Invoke-Quiet 'icacls.exe'  ("`"$Path`" /grant *S-1-5-32-544:(F) /T /C /Q") | Out-Null
+}
+
 function Disable-Svc {
     param([string]$Name)
+    if (-not (Get-Service -Name $Name -ErrorAction SilentlyContinue)) { return }
+    Stop-Service -Name $Name -Force -ErrorAction SilentlyContinue
     try {
-        $svc = Get-Service -Name $Name -ErrorAction Stop
-        Stop-Service  -Name $Name -Force -ErrorAction SilentlyContinue
-        Set-Service   -Name $Name -StartupType Disabled
+        Set-Service -Name $Name -StartupType Disabled -ErrorAction Stop
     } catch {
-        # Service doesn't exist - that's fine
+        Write-Warn "Could not disable service $Name : $($_.Exception.Message)"
     }
 }
 
@@ -170,16 +207,16 @@ try {
         $script:IsLaptop = $true
     } else {
         $chassis = (Get-CimInstance -ClassName Win32_SystemEnclosure -ErrorAction SilentlyContinue).ChassisTypes
-        if ($chassis | Where-Object { $_ -in 8,9,10,11,12,14,18,21,30,31,32 }) { $script:IsLaptop = $true }
+        if ($chassis | Where-Object { $_ -in 8,9,10,11,12,14,30,31,32 }) { $script:IsLaptop = $true }
     }
 } catch { }
 
 Clear-Host
 Write-Host ""
-Write-Host "  +----------------------------------------------------------+" -ForegroundColor $C
-Write-Host "  |   niix-tweaks  --  Post-Install Hardening Script         |" -ForegroundColor $C
-Write-Host "  |   Running as Administrator. Restart when done.           |" -ForegroundColor $C
-Write-Host "  +----------------------------------------------------------+" -ForegroundColor $C
+Write-Host "  +----------------------------------------------------------+" -ForegroundColor $ClrCyan
+Write-Host "  |   niix-tweaks  --  Post-Install Hardening Script         |" -ForegroundColor $ClrCyan
+Write-Host "  |   Running as Administrator. Restart when done.           |" -ForegroundColor $ClrCyan
+Write-Host "  +----------------------------------------------------------+" -ForegroundColor $ClrCyan
 Write-Host ""
 
 # ============================================================
@@ -251,13 +288,14 @@ if ($edgeSetups.Count -gt 0) {
     try {
         # Stub file unlocks the uninstaller (winutil method)
         $stubDir = "C:\Windows\SystemApps\Microsoft.MicrosoftEdge_8wekyb3d8bbwe"
-        if (-not (Test-Path $stubDir)) { New-Item -Path $stubDir -ItemType Directory -Force | Out-Null }
-        New-Item -Path "$stubDir\MicrosoftEdge.exe" -Force | Out-Null
+        if (-not (Test-Path -LiteralPath $stubDir)) { New-Item -Path $stubDir -ItemType Directory -Force -ErrorAction Stop | Out-Null }
+        New-Item -Path "$stubDir\MicrosoftEdge.exe" -ItemType File -Force -ErrorAction Stop | Out-Null
 
         $proc = Start-Process -FilePath $edgeSetups[0].FullName `
             -ArgumentList '--uninstall --system-level --force-uninstall --delete-profile' `
             -Wait -PassThru -NoNewWindow -ErrorAction Stop
-        if ($proc.ExitCode -eq 0) { Write-Ok "Edge uninstaller exited cleanly" }
+        # Chromium-based setup.exe returns 19 (UNINSTALL_SUCCESSFUL) on success
+        if ($proc.ExitCode -in 0, 19) { Write-Ok "Edge uninstaller completed successfully" }
         else { Write-Warn "Edge uninstaller exit code: $($proc.ExitCode) - continuing with manual removal" }
     } catch { Write-Warn "Uninstaller error: $_ - continuing with manual removal" }
 } else {
@@ -279,9 +317,8 @@ $edgeDirs = @(
 foreach ($dir in $edgeDirs) {
     if (Test-Path $dir) {
         try {
-            & takeown /f $dir /r /d y 2>&1 | Out-Null
-            & icacls $dir /grant "Administrators:(F)" /T /C /Q 2>&1 | Out-Null
-            Remove-Item $dir -Recurse -Force -ErrorAction Stop
+            Grant-AdminFullControl $dir
+            Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction Stop
             Write-Body "Deleted: $dir"
         } catch { Write-Warn "Could not fully delete $dir : $_" }
     }
@@ -302,6 +339,8 @@ Remove-Item "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Microsoft Edge.l
 Set-Reg 'HKLM:\SOFTWARE\Microsoft\EdgeUpdate'          'DoNotUpdateToEdgeWithChromium' 'DWord'  1
 Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\EdgeUpdate' 'UpdateDefault'                 'DWord'  0
 Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\EdgeUpdate' 'InstallDefault'                'DWord'  0
+Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\EdgeUpdate' 'Install{56EB18F8-B008-4CBD-B6D2-8C97FE7E9062}' 'DWord' 0
+Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\EdgeUpdate' 'Update{56EB18F8-B008-4CBD-B6D2-8C97FE7E9062}'  'DWord' 0
 Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\EdgeUpdate' 'Install{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}' 'DWord' 1
 Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\EdgeUpdate' 'Update{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'  'DWord' 1
 Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Edge'       'HideFirstRunExperience'        'DWord'  1
@@ -309,18 +348,16 @@ Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Edge'       'BackgroundModeEnabled'  
 Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Edge'       'StartupBoostEnabled'           'DWord'  0
 Set-RegOwned 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MicrosoftEdge' 'IsEdgeStableSetupDone' 'DWord' 1
 
-# Make sure the updater service WebView2 relies on is actually running
-foreach ($svc in 'edgeupdate','edgeupdatem') {
-    try {
-        Set-Service -Name $svc -StartupType Manual -ErrorAction SilentlyContinue
-    } catch {}
-}
+# Make sure the updater services WebView2 relies on are not disabled
+# (edgeupdate defaults to Automatic, edgeupdatem to Manual)
+Set-Service -Name 'edgeupdate'  -StartupType Automatic -ErrorAction SilentlyContinue
+Set-Service -Name 'edgeupdatem' -StartupType Manual    -ErrorAction SilentlyContinue
 
-# Block Windows Update from pushing Edge back
-Remove-ItemProperty 'HKLM:\SOFTWARE\Microsoft\WindowsUpdate\Orchestrator\UScheduler_Oobe' `
-    -Name 'EdgeUpdate' -Force -ErrorAction SilentlyContinue
+# Block Windows Update from pushing Edge back (this is a key, not a value)
+Remove-Item -LiteralPath 'HKLM:\SOFTWARE\Microsoft\WindowsUpdate\Orchestrator\UScheduler_Oobe\EdgeUpdate' `
+    -Recurse -Force -ErrorAction SilentlyContinue
 
-Write-Ok "Edge fully removed and permanently blocked"
+Write-Ok "Edge browser removed and blocked (WebView2 Runtime kept)"
 
 # ============================================================
 #  4. DISABLE XBOX / GAMEBAR SERVICES
@@ -360,6 +397,31 @@ Write-Title "5. Disabling privacy-invasive services..."
   'WMPNetworkSvc','WpcMonSvc','wisvc','RetailDemo') | ForEach-Object { Disable-Svc $_ }
 
 Write-Ok "Telemetry/tracking services disabled (app-critical services left enabled)"
+
+# Telemetry scheduled tasks are DISABLED, never deleted: deleting task files
+# leaves orphaned Task Scheduler entries ("task image is corrupt") and some
+# folders (InstallService, CloudExperienceHost) are needed by Store/OOBE.
+$telemetryTasks = @(
+    @('\Microsoft\Windows\Application Experience\', 'Microsoft Compatibility Appraiser'),
+    @('\Microsoft\Windows\Application Experience\', 'Microsoft Compatibility Appraiser Exp'),
+    @('\Microsoft\Windows\Application Experience\', 'ProgramDataUpdater'),
+    @('\Microsoft\Windows\Application Experience\', 'MareBackup'),
+    @('\Microsoft\Windows\Autochk\',                'Proxy'),
+    @('\Microsoft\Windows\Customer Experience Improvement Program\', 'Consolidator'),
+    @('\Microsoft\Windows\Customer Experience Improvement Program\', 'UsbCeip'),
+    @('\Microsoft\Windows\DiskDiagnostic\',         'Microsoft-Windows-DiskDiagnosticDataCollector'),
+    @('\Microsoft\Windows\Feedback\Siuf\',         'DmClient'),
+    @('\Microsoft\Windows\Feedback\Siuf\',         'DmClientOnScenarioDownload'),
+    @('\Microsoft\Windows\Windows Error Reporting\','QueueReporting')
+)
+foreach ($t in $telemetryTasks) {
+    $task = Get-ScheduledTask -TaskPath $t[0] -TaskName $t[1] -ErrorAction SilentlyContinue
+    if ($task -and $task.State -ne 'Disabled') {
+        try { $task | Disable-ScheduledTask -ErrorAction Stop | Out-Null }
+        catch { Write-Warn "Could not disable task $($t[0])$($t[1]) : $($_.Exception.Message)" }
+    }
+}
+Write-Ok "Telemetry scheduled tasks disabled"
 
 # ============================================================
 #  6. TELEMETRY & DATA COLLECTION
@@ -476,13 +538,15 @@ Set-Reg 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Start'                 
 # is a direct, always-works fallback that runs against whatever is pinned
 # right now, using the same "Unpin from taskbar" verb the shell itself uses.
 try {
-    $storeApp = Get-StartApps | Where-Object { $_.AppID -like '*WindowsStore*' } | Select-Object -First 1
+    $storeApp = @(Get-StartApps | Where-Object { $_.AppID -like '*WindowsStore*' })[0]
     if ($storeApp) {
         $shellApp = New-Object -ComObject Shell.Application
         $folder = $shellApp.NameSpace('shell:::{4234d49b-0245-4df3-b780-3893943456e1}') # Apps folder
-        $item = $folder.ParseName($storeApp.AppID)
-        $verb = $item.Verbs() | Where-Object { ($_.Name -replace '&','') -match 'unpin.*taskbar' }
-        if ($verb) { $verb.DoIt() }
+        $item = @(@($folder.Items()) | Where-Object { $_.Path -eq $storeApp.AppID })[0]
+        if ($item) {
+            $verb = @(@($item.Verbs()) | Where-Object { ($_.Name -replace '&','') -match 'unpin.*taskbar' })[0]
+            if ($verb) { $verb.DoIt() }
+        }
     }
 } catch { Write-Warn "Unpinning Microsoft Store from taskbar: $_" }
 
@@ -568,15 +632,17 @@ Write-Title "12. Configuring Windows Update..."
     Remove-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate' $_ -Force -ErrorAction SilentlyContinue
 }
 
-# No auto-restart, notify only, no P2P delivery
-Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' 'NoAutoRebootWithLoggedOnUsers' 'DWord' 1
+# Auto-download, notify to install, no auto-restart while signed in, no P2P
+Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' 'NoAutoUpdate'                  'DWord' 0
 Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' 'AUOptions'                     'DWord' 3
-Set-Reg 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\DeliveryOptimization\Config' 'DODownloadMode' 'DWord' 0
+Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' 'NoAutoRebootWithLoggedOnUsers' 'DWord' 1
+Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization' 'DODownloadMode' 'DWord' 0
 
-Set-Service -Name 'BITS'         -StartupType Manual    -ErrorAction SilentlyContinue
-Set-Service -Name 'wuauserv'     -StartupType Manual    -ErrorAction SilentlyContinue
-Set-Service -Name 'UsoSvc'       -StartupType Automatic -ErrorAction SilentlyContinue
-Set-Service -Name 'WaaSMedicSvc' -StartupType Manual    -ErrorAction SilentlyContinue
+# Restore the service the ISO disabled for OOBE (WaaSMedicSvc is protected
+# and was never touched, so it is not changed here)
+try {
+    Set-Service -Name 'wuauserv' -StartupType Manual -ErrorAction Stop
+} catch { Write-Warn "wuauserv startup type: $($_.Exception.Message)" }
 
 # Actually start them now rather than waiting for next reboot, and reset the
 # WU client's local state in case it's stuck from the offline suppression
@@ -587,7 +653,10 @@ try {
     Start-Service -Name UsoSvc    -ErrorAction SilentlyContinue
 } catch { Write-Warn "Restarting WU services: $_" }
 
-Write-Ok "Windows Update configured (notify-only, no auto-restart, no P2P)"
+if ((Get-Service -Name 'wuauserv' -ErrorAction SilentlyContinue).StartType -eq 'Disabled') {
+    Write-Warn "Windows Update service is still disabled -- set it to Manual in services.msc"
+}
+Write-Ok "Windows Update configured (auto-download, notify to install, no auto-restart, no P2P)"
 
 # ============================================================
 #  13. BITLOCKER
@@ -616,8 +685,8 @@ Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System'  'EnableSmartScreen' 
 net.exe accounts /maxpwage:UNLIMITED 2>&1 | Out-Null
 
 try {
-    if ((bcdedit | Select-String 'path').Count -eq 2) {
-        bcdedit /set '{bootmgr}' timeout 0 2>&1 | Out-Null
+    if (@(bcdedit.exe | Select-String 'path').Count -eq 2) {
+        bcdedit.exe /set '{bootmgr}' timeout 0 2>&1 | Out-Null
     }
 } catch {}
 
@@ -628,13 +697,12 @@ Write-Ok "Miscellaneous hardening done"
 # ============================================================
 Write-Title "15. Additional privacy tweaks..."
 
-# Stop Defender auto-uploading suspicious files to Microsoft for analysis.
-# Trade-off: this is Microsoft's cloud-assisted detection for brand-new
-# (zero-day) malware samples -- turning it off means Defender still protects
-# you with its local signatures/heuristics, just without that cloud lookup
-# on unknown files. Real-time protection itself is left fully enabled.
-Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Spynet' 'SpynetReporting'  'DWord' 0
+# Stop Defender uploading your files to Microsoft (SubmitSamplesConsent=2,
+# "never send"). Cloud-delivered protection (MAPS lookups by file hash /
+# metadata) is deliberately KEPT ON: it is Defender's main defence against
+# brand-new malware. A SpynetReporting=0 left by an older build is removed.
 Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Spynet' 'SubmitSamplesConsent' 'DWord' 2
+Remove-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Spynet' -Name 'SpynetReporting' -Force -ErrorAction SilentlyContinue
 
 # Clipboard: stop clipboard history syncing to your Microsoft account across
 # devices, and stop the "suggested actions" popup (phone numbers/dates in
@@ -666,10 +734,9 @@ try {
 
 # Stop Windows updating NTFS "last accessed" timestamps on every file touch --
 # a small, free reduction in disk writes with no real downside.
-try {
-    fsutil behavior set disablelastaccess 1 | Out-Null
-    Write-Ok "NTFS last-access timestamps disabled"
-} catch { Write-Warn "fsutil disablelastaccess: $_" }
+fsutil.exe behavior set disablelastaccess 1 2>&1 | Out-Null
+if ($LASTEXITCODE -eq 0) { Write-Ok "NTFS last-access timestamps disabled" }
+else { Write-Warn "fsutil disablelastaccess failed (exit $LASTEXITCODE)" }
 
 # MMCSS network/multimedia scheduling: stop Windows throttling background
 # network and audio processing in favor of foreground apps. Standard,
@@ -687,30 +754,37 @@ if (-not $script:IsLaptop) {
     # --- DESKTOP-ONLY: battery management is irrelevant, so go aggressive ----
 
     # Turn off hibernation entirely -- reclaims disk space equal to installed
-    # RAM (hiberfil.sys). Also disables Fast Startup (which relies on it); on an
-    # SSD desktop that's no real loss.
-    try {
-        powercfg /hibernate off 2>&1 | Out-Null
-        Write-Ok "Hibernation disabled, Fast Startup off (disk space reclaimed)"
-    } catch { Write-Warn "Disabling hibernation: $_" }
+    # RAM (hiberfil.sys). Also disables Fast Startup (which relies on it).
+    powercfg.exe /hibernate off 2>&1 | Out-Null
+    if ($LASTEXITCODE -eq 0) { Write-Ok "Hibernation disabled, Fast Startup off (disk space reclaimed)" }
+    else { Write-Warn "Disabling hibernation failed (exit $LASTEXITCODE)" }
 
-    # USB selective suspend off -- stops mice/audio interfaces/controllers from
-    # power-cycling when briefly idle. No battery to protect on a desktop.
-    try {
-        $activeScheme = (powercfg /getactivescheme) -replace '.*: ([a-f0-9-]+).*','$1'
-        powercfg /setacvalueindex $activeScheme 2a737441-1930-4402-8d77-b2bebba308a3 48e6b7a6-50f5-4782-a5d4-53bb8f07e226 0 2>&1 | Out-Null
-        powercfg /setactive $activeScheme 2>&1 | Out-Null
-        Write-Ok "USB selective suspend disabled"
-    } catch { Write-Warn "USB selective suspend: $_" }
+    # Power plan -> High performance FIRST, so the USB setting below lands on
+    # the plan that is actually active. If the plan is hidden/missing (common
+    # on OEM images) it is restored from its built-in template.
+    $highPerfGuid = '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c'
+    powercfg.exe /setactive $highPerfGuid 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        $dup = (powercfg.exe /duplicatescheme $highPerfGuid 2>&1 | Out-String)
+        if ($dup -match '([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})') {
+            powercfg.exe /setactive $Matches[1] 2>&1 | Out-Null
+        }
+    }
+    if ($LASTEXITCODE -eq 0) { Write-Ok "Power plan set to High performance" }
+    else { Write-Warn "High performance power plan is not available on this system (Modern Standby devices only offer Balanced)" }
 
-    # Power plan -> High performance. On a desktop this removes CPU parking and
-    # frequency-scaling latency the Balanced plan adds to save power you don't
-    # need to save here.
-    try {
-        $highPerfGuid = '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c'
-        powercfg /setactive $highPerfGuid 2>&1 | Out-Null
-        Write-Ok "Power plan set to High performance"
-    } catch { Write-Warn "Setting High performance power plan: $_" }
+    # USB selective suspend off (AC) on the active plan -- stops mice, audio
+    # interfaces and controllers power-cycling when briefly idle.
+    $activeOut = (powercfg.exe /getactivescheme 2>&1 | Out-String)
+    if ($activeOut -match '([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})') {
+        $activeScheme = $Matches[1]
+        powercfg.exe /setacvalueindex $activeScheme 2a737441-1930-4402-8d77-b2bebba308a3 48e6b7a6-50f5-4782-a5d4-53bb8f07e226 0 2>&1 | Out-Null
+        $usbOk = ($LASTEXITCODE -eq 0)
+        powercfg.exe /setactive $activeScheme 2>&1 | Out-Null
+        if ($usbOk) { Write-Ok "USB selective suspend disabled" } else { Write-Warn "USB selective suspend setting not available" }
+    } else {
+        Write-Warn "Could not read the active power scheme"
+    }
 
     Write-Ok "Desktop performance/power tweaks done"
 } else {
@@ -729,21 +803,21 @@ if (-not $script:IsLaptop) {
 #  DONE
 # ============================================================
 Write-Host ""
-Write-Host "  +----------------------------------------------------------+" -ForegroundColor $C
+Write-Host "  +----------------------------------------------------------+" -ForegroundColor $ClrCyan
 
 if ($warnings.Count -eq 0) {
-    Write-Host "  |   [OK]  All tweaks applied with no warnings.             |" -ForegroundColor $C
+    Write-Host "  |   [OK]  All tweaks applied with no warnings.             |" -ForegroundColor $ClrCyan
 } else {
-    Write-Host ("  |   Done with {0} warning(s):                               |" -f $warnings.Count) -ForegroundColor Yellow
-    foreach ($w in $warnings) {
-        $short = $w.Substring(0, [Math]::Min(52, $w.Length))
-        Write-Host ("  |   ! {0,-54}|" -f $short) -ForegroundColor Yellow
+    Write-Host ("  |   {0,-55}|" -f "Done with $($warnings.Count) warning(s):") -ForegroundColor Yellow
+    foreach ($warnItem in $warnings) {
+        $short = $warnItem.Substring(0, [Math]::Min(53, $warnItem.Length))
+        Write-Host ("  |   ! {0,-53}|" -f $short) -ForegroundColor Yellow
     }
 }
 
-Write-Host "  |                                                          |" -ForegroundColor $C
-Write-Host "  |   A restart is required to fully apply all changes.      |" -ForegroundColor $C
-Write-Host "  +----------------------------------------------------------+" -ForegroundColor $C
+Write-Host "  |                                                          |" -ForegroundColor $ClrCyan
+Write-Host "  |   A restart is required to fully apply all changes.      |" -ForegroundColor $ClrCyan
+Write-Host "  +----------------------------------------------------------+" -ForegroundColor $ClrCyan
 Write-Host ""
 
 # Pull the OOBE-phase logs (Specialize/UserOnce/DefaultUser/FirstLogon) into
