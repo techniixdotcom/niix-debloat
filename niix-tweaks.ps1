@@ -800,6 +800,70 @@ if (-not $script:IsLaptop) {
 }
 
 # ============================================================
+#  17. TIME SYNCHRONISATION
+# ============================================================
+Write-Title "17. Configuring automatic time sync..."
+
+# Why the clock drifts on a stock install: on a PC that is not joined to a
+# domain, the Windows Time service (W32Time) is "Manual (Trigger Start)" and
+# its only trigger is domain-join. It therefore only runs when the weekly
+# "SynchronizeTime" scheduled task wakes it, syncs once, and stops again --
+# so the clock free-runs on the motherboard RTC for up to 7 days and drifts.
+# Fix: run W32Time permanently (delayed auto-start, trigger removed), use
+# several reliable NTP servers, and poll every hour. Secure Time Seeding and
+# the default phase-correction safety limits are deliberately left as-is.
+$w32tm = Join-Path $env:SystemRoot 'System32\w32tm.exe'
+$scExe = Join-Path $env:SystemRoot 'System32\sc.exe'
+
+if (-not (Get-Service -Name 'W32Time' -ErrorAction SilentlyContinue)) {
+    $r = Invoke-Quiet $w32tm '/register'
+    if ($r.ExitCode -ne 0) { Write-Warn "w32tm /register failed (exit $($r.ExitCode))" }
+}
+
+$timeSvc = Get-Service -Name 'W32Time' -ErrorAction SilentlyContinue
+if (-not $timeSvc) {
+    Write-Warn "Windows Time service (W32Time) is missing -- clock sync not configured"
+} else {
+    $r = Invoke-Quiet $scExe 'triggerinfo W32Time delete'
+    if ($r.ExitCode -ne 0) { Write-Warn "W32Time trigger removal failed (exit $($r.ExitCode))" }
+
+    $r = Invoke-Quiet $scExe 'config W32Time start= delayed-auto'
+    if ($r.ExitCode -ne 0) { Write-Warn "W32Time start type failed (exit $($r.ExitCode))" }
+
+    $r = Invoke-Quiet $scExe 'failure W32Time reset= 86400 actions= restart/60000/restart/60000/restart/60000'
+    if ($r.ExitCode -ne 0) { Write-Warn "W32Time recovery actions failed (exit $($r.ExitCode))" }
+
+    try {
+        Start-Service -Name 'W32Time' -ErrorAction Stop
+        (Get-Service -Name 'W32Time').WaitForStatus('Running', [TimeSpan]::FromSeconds(30))
+    } catch { Write-Warn "Could not start W32Time: $($_.Exception.Message)" }
+
+    $r = Invoke-Quiet $w32tm '/config /manualpeerlist:"time.windows.com,0x9 time.cloudflare.com,0x9 pool.ntp.org,0x9" /syncfromflags:manual /reliable:no /update'
+    if ($r.ExitCode -ne 0) { Write-Warn "w32tm /config failed (exit $($r.ExitCode)): $($r.Output.Trim())" }
+
+    $ntpClient = 'HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\TimeProviders\NtpClient'
+    Set-Reg $ntpClient 'Enabled'             'DWord' 1
+    Set-Reg $ntpClient 'SpecialPollInterval' 'DWord' 3600
+
+    $r = Invoke-Quiet $w32tm '/config /update'
+    if ($r.ExitCode -ne 0) { Write-Warn "w32tm /config /update failed (exit $($r.ExitCode))" }
+
+    $syncTask = Get-ScheduledTask -TaskPath '\Microsoft\Windows\Time Synchronization\' -TaskName 'SynchronizeTime' -ErrorAction SilentlyContinue
+    if ($syncTask -and $syncTask.State -eq 'Disabled') {
+        try { $syncTask | Enable-ScheduledTask -ErrorAction Stop | Out-Null }
+        catch { Write-Warn "Could not enable SynchronizeTime task: $($_.Exception.Message)" }
+    }
+
+    $r = Invoke-Quiet $w32tm '/resync /rediscover'
+    if ($r.ExitCode -eq 0) {
+        Write-Ok "Clock synced now; W32Time always running, re-syncs every hour"
+    } else {
+        Write-Body "No time server reachable right now -- the clock will sync automatically once online."
+        Write-Ok "W32Time always running, re-syncs every hour"
+    }
+}
+
+# ============================================================
 #  DONE
 # ============================================================
 Write-Host ""
