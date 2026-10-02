@@ -1,5 +1,7 @@
 # niixdebloat
 
+by: cuteLiLi / techniix / QuacK
+
 Build a privacy-hardened, debloated, gaming-tuned Windows 11 install ISO from an official Microsoft ISO — no manual post-install cleanup required. Everything below is applied automatically during Windows Setup and at first logon.
 
 Based on [WinUtil](https://github.com/ChrisTitusTech/winutil) by Chris Titus and the [Schneegans unattend generator](https://schneegans.de/windows/unattend-generator/), customised by [techniix](https://github.com/techniixdotcom).
