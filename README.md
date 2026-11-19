@@ -1,6 +1,6 @@
 # niixdebloat
 
-by: cuteLiLi / techniix / QuacK / decoi
+by: cuteLiLi / techniix / QuacK
 
 Build a privacy-hardened, debloated, gaming-tuned Windows 11 install ISO from an official Microsoft ISO — no manual post-install cleanup required. Everything below is applied automatically during Windows Setup and at first logon.
 
@@ -12,7 +12,7 @@ Based on [WinUtil](https://github.com/ChrisTitusTech/winutil) by Chris Titus and
 |---|---|
 | `niixdebloat.ps1` | The builder. Mounts a Windows 11 ISO, applies offline registry/image edits, bakes in the answer file and tweaks script, and produces a new customized `.iso`. |
 | `unattend.xml` | Plain-text Windows Setup answer file (`autounattend.xml`). Bypasses TPM/Secure Boot/RAM checks, skips Microsoft-account push, and wires up automatic first-logon customization. |
-| `niix-tweaks.ps1` | Plain-text post-install script. Auto-runs once, elevated, at first logon — this is where most of the debloat/privacy/performance work actually happens. |
+| `niix-tweaks.ps1` | Plain-text post-install script. Auto-runs elevated at first logon — this is where most of the debloat/privacy/performance work actually happens — then re-applies itself silently at every login (see "Staying applied after Windows updates"). |
 
 All three files must stay together in the same folder — `niixdebloat.ps1` reads the other two as plain text at build time. Open either file directly in a text editor to see exactly what it does or to customize it.
 
@@ -97,6 +97,19 @@ Dark mode (system + apps), transparency effects **on**, classic accent color, cu
 
 ### Windows Update
 Only the Windows Update service (`wuauserv`) is paused during OOBE, and it is restored at first logon by both `FirstLogon.ps1` and `niix-tweaks.ps1`. Protected services (`WaaSMedicSvc`, `UsoSvc`) and WU's scheduled tasks are never touched, so Windows Update cannot end up permanently broken. After setup, updates download automatically, you choose when to install, there are no automatic restarts while you're signed in, and peer-to-peer delivery is off.
+
+### Time sync
+- Hardware clock treated as UTC (`RealTimeIsUniversal=1`), the same as Linux — fixes the 1–2 hour clock offset when dual-booting, from the moment Windows starts
+- Windows Time service runs permanently and syncs every hour against **time.cloudflare.com only** (no time.windows.com)
+- A `NiixTimeSync` scheduled task runs at **every login**: it switches "Set time automatically" off and back on, restarts the time service and forces an immediate resync (retrying for ~2 minutes while the network comes up). Last result: `C:\Windows\Setup\Scripts\NiixTimeSync.log`
+- The 15-hour correction limit Windows applies to non-domain PCs is removed, so a badly wrong clock (dead CMOS battery, dual-boot with Linux) still gets fixed
+- Secure Time Seeding (guessing time from SSL handshakes, a known cause of sudden wrong-time jumps) is turned off
+
+### Hosts file blocks
+A marked block is added to `C:\Windows\System32\drivers\etc\hosts` pointing these names to `127.0.0.1`: data.microsoft.com, msftconnecttest.com, azureedge.net, activity.windows.com, bingapis.com, msedge.net, assets.msn.com, scorecardresearch.com, edge.microsoft.com, data.msn.com (plus the standard localhost lines). Re-running the script replaces the block rather than duplicating it; other hosts entries are left alone. Hosts entries match exact names only — subdomains are not blocked. Microsoft Defender may flag hosts entries for Microsoft domains as `SettingsModifier:Win32/HostsFileHijack`; choose "Allow on device" if you want to keep them.
+
+### Staying applied after Windows updates
+After the first run, a `NiixTweaksMaintain` scheduled task re-runs `niix-tweaks.ps1 -Background` silently one minute after every login, so policies, services, apps or Edge that an update brings back are removed/reset again. Background mode never restarts Explorer, never decrypts BitLocker (if you turned it on yourself, it stays on) and never asks to restart. Its last run is logged to `Documents\NiixDebloat-Logs\niix-tweaks_background.log`. To stop it, disable or delete `NiixTweaksMaintain` in Task Scheduler. Running a newer `niix-tweaks.ps1` manually updates the copy the task uses.
 
 ### Gaming performance & power (auto-detects desktop vs laptop)
 The post-install script detects whether the machine is a **laptop** (has a battery) or a **desktop** and adjusts the power tweaks accordingly, so this one build is safe on both.

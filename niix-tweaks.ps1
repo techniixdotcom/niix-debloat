@@ -1,15 +1,7 @@
-<#
-.SYNOPSIS
-    niix-tweaks.ps1 - Post-install privacy hardening, debloat and service tweaks
-.DESCRIPTION
-    Run once on a fresh Windows 11 install. Removes Edge, Windows Backup,
-    applies all privacy/service tweaks and dark theme correctly.
-    Runs under Windows PowerShell 5.1; relaunches itself elevated in 5.1 if
-    started without admin rights or from PowerShell 7.
-#>
+param([switch]$Background)
 
-# ---- Self-elevate / force Windows PowerShell 5.1 (AppX cmdlets need it) ----
 $_isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if ($Background -and (-not $_isAdmin -or $PSVersionTable.PSEdition -eq 'Core')) { exit 1 }
 if (-not $_isAdmin -or $PSVersionTable.PSEdition -eq 'Core') {
     $_winPS   = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $_argList = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
@@ -21,34 +13,33 @@ if (-not $_isAdmin -or $PSVersionTable.PSEdition -eq 'Core') {
     exit
 }
 
-# ---- Only run once: unregister the auto-run scheduled task if present ----
-# (harmless no-op if it doesn't exist, e.g. when double-clicked manually)
 Unregister-ScheduledTask -TaskName 'NiixTweaksAutoRun' -Confirm:$false -ErrorAction SilentlyContinue
 
-# ---- Fix the execution policy permanently, once, so this never blocks a
-# manual re-run of this (or any other local) script again. RemoteSigned still
-# requires downloaded/remote scripts to be signed -- it only stops blocking
-# scripts that already exist locally on this machine, which is what the
-# default "Restricted" policy was doing to you just now.
 try {
     Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope LocalMachine -Force -ErrorAction Stop
-    Write-Host "  [OK] Execution policy set to RemoteSigned (local scripts will always run from now on)" -ForegroundColor Cyan
+    Write-Host "  [OK] Execution policy set to RemoteSigned (local scripts will always run from now on)" -ForegroundColor Green
 } catch {
     Write-Host "  [WARN] Set-ExecutionPolicy: $_" -ForegroundColor Yellow
 }
 
-# ---- Full transcript log, saved to this user's Documents for troubleshooting ----
 $logDir = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'NiixDebloat-Logs'
 New-Item -ItemType Directory -Path $logDir -Force -ErrorAction SilentlyContinue | Out-Null
-$logFile = Join-Path $logDir ("niix-tweaks_{0:yyyy-MM-dd_HH-mm-ss}.log" -f (Get-Date))
+if ($Background) {
+    $logFile = Join-Path $logDir 'niix-tweaks_background.log'
+} else {
+    $logFile = Join-Path $logDir ("niix-tweaks_{0:yyyy-MM-dd_HH-mm-ss}.log" -f (Get-Date))
+}
 try { Start-Transcript -Path $logFile -Force | Out-Null } catch { }
 
-$ClrCyan = 'Cyan'; $ClrGreen = 'Green'; $ClrWhite = 'White'; $ClrRed = 'Red'
+$PINK  = 'Magenta'
+$GREEN = 'Green'
+$WHITE = 'White'
+$RED   = 'Red'
 $warnings = [System.Collections.Generic.List[string]]::new()
 
-function Write-Title   { param($t) Write-Host "`n  $t" -ForegroundColor $ClrGreen }
-function Write-Body    { param($t) Write-Host "  $t"   -ForegroundColor $ClrWhite }
-function Write-Ok      { param($t) Write-Host "  [OK] $t" -ForegroundColor $ClrCyan }
+function Write-Title   { param($t) Write-Host ""; Write-Host "  $t" -ForegroundColor $PINK; Write-Host "" }
+function Write-Body    { param($t) Write-Host "  $t" -ForegroundColor $WHITE }
+function Write-Ok      { param($t) Write-Host "  [OK] $t" -ForegroundColor $GREEN }
 function Write-Warn    { param($t) Write-Host "  [WARN] $t" -ForegroundColor Yellow; $script:warnings.Add($t) }
 
 function Set-Reg {
@@ -63,8 +54,6 @@ function Set-Reg {
     } catch { Write-Warn "Reg $Path\$Name : $_" }
 }
 
-# P/Invoke: enable SeRestorePrivilege + SeBackupPrivilege so we can
-# take ownership of system-protected registry keys
 $script:_privEnabled = $false
 function Enable-RegPrivileges {
     if ($script:_privEnabled) { return }
@@ -119,7 +108,6 @@ function Set-RegOwned {
             'HKCR' = [Microsoft.Win32.Registry]::ClassesRoot
         }
         $root = $hiveMap[$hive]
-        # Open with TakeOwnership right (requires SeTakeOwnershipPrivilege)
         $key = $root.OpenSubKey($sub,
             [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree,
             [System.Security.AccessControl.RegistryRights]::TakeOwnership)
@@ -130,7 +118,6 @@ function Set-RegOwned {
             $key.SetAccessControl($acl)
             $key.Close()
         }
-        # Re-open with ChangePermissions to grant full control
         $key2 = $root.OpenSubKey($sub,
             [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree,
             [System.Security.AccessControl.RegistryRights]::ChangePermissions)
@@ -196,11 +183,6 @@ function Remove-AppXByName {
     } catch {}
 }
 
-# ---- Detect chassis: laptop (battery-powered) vs desktop ----
-# Drives the power section below so battery-dependent tweaks (hibernation off,
-# USB selective suspend off, High-performance plan) are applied on desktops
-# only, while laptops keep sleep/hibernate, USB power management and the
-# battery-aware Balanced plan. The gaming/latency tweaks apply to both.
 $script:IsLaptop = $false
 try {
     if (Get-CimInstance -ClassName Win32_Battery -ErrorAction SilentlyContinue) {
@@ -213,15 +195,12 @@ try {
 
 Clear-Host
 Write-Host ""
-Write-Host "  +----------------------------------------------------------+" -ForegroundColor $ClrCyan
-Write-Host "  |   niix-tweaks  --  Post-Install Hardening Script         |" -ForegroundColor $ClrCyan
-Write-Host "  |   Running as Administrator. Restart when done.           |" -ForegroundColor $ClrCyan
-Write-Host "  +----------------------------------------------------------+" -ForegroundColor $ClrCyan
+Write-Host "  +----------------------------------------------------------+" -ForegroundColor $PINK
+Write-Host "  |   niix-tweaks  --  Post-Install Hardening Script         |" -ForegroundColor $PINK
+Write-Host "  |   Running as Administrator. Restart when done.           |" -ForegroundColor $PINK
+Write-Host "  +----------------------------------------------------------+" -ForegroundColor $PINK
 Write-Host ""
 
-# ============================================================
-#  1. REMOVE APPX BLOATWARE
-# ============================================================
 Write-Title "1. Removing AppX bloatware..."
 
 $bloat = @(
@@ -249,9 +228,6 @@ $bloat = @(
 foreach ($pkg in $bloat) { Remove-AppXByName $pkg }
 Write-Ok "AppX removal pass complete"
 
-# ============================================================
-#  2. REMOVE WINDOWS BACKUP (WindowsCapability, not AppX)
-# ============================================================
 Write-Title "2. Removing Windows Backup..."
 
 try {
@@ -265,28 +241,20 @@ try {
     }
 } catch { Write-Warn "Windows Backup removal: $_" }
 
-# Also remove the AppX entry if present
 Remove-AppXByName 'Microsoft.WindowsBackup'
 
-# Disable backup service and policy
-Disable-Svc 'SDRSVC'   # Windows Backup service
-Disable-Svc 'wbengine' # Block Level Backup Engine
+Disable-Svc 'SDRSVC'
+Disable-Svc 'wbengine'
 Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\BackupAndRestore' 'DisableBackup' 'DWord' 1
 
 Write-Ok "Windows Backup disabled"
 
-# ============================================================
-#  3. REMOVE MICROSOFT EDGE
-# ============================================================
 Write-Title "3. Removing Microsoft Edge completely..."
 
-# Step 1: Run the official uninstaller if Edge is still present (it may have been
-# removed offline already by niixdebloat.ps1, but run it anyway to be sure)
 $edgeSetups = @(Get-ChildItem "C:\Program Files (x86)\Microsoft\Edge\Application\*\Installer\setup.exe" -ErrorAction SilentlyContinue)
 if ($edgeSetups.Count -gt 0) {
     Write-Body "Edge install found - running official uninstaller..."
     try {
-        # Stub file unlocks the uninstaller (winutil method)
         $stubDir = "C:\Windows\SystemApps\Microsoft.MicrosoftEdge_8wekyb3d8bbwe"
         if (-not (Test-Path -LiteralPath $stubDir)) { New-Item -Path $stubDir -ItemType Directory -Force -ErrorAction Stop | Out-Null }
         New-Item -Path "$stubDir\MicrosoftEdge.exe" -ItemType File -Force -ErrorAction Stop | Out-Null
@@ -294,7 +262,6 @@ if ($edgeSetups.Count -gt 0) {
         $proc = Start-Process -FilePath $edgeSetups[0].FullName `
             -ArgumentList '--uninstall --system-level --force-uninstall --delete-profile' `
             -Wait -PassThru -NoNewWindow -ErrorAction Stop
-        # Chromium-based setup.exe returns 19 (UNINSTALL_SUCCESSFUL) on success
         if ($proc.ExitCode -in 0, 19) { Write-Ok "Edge uninstaller completed successfully" }
         else { Write-Warn "Edge uninstaller exit code: $($proc.ExitCode) - continuing with manual removal" }
     } catch { Write-Warn "Uninstaller error: $_ - continuing with manual removal" }
@@ -302,12 +269,7 @@ if ($edgeSetups.Count -gt 0) {
     Write-Body "Edge installer not found - likely removed offline already"
 }
 
-# Step 2: Force-delete all remaining Edge directories and files
 Write-Body "Force-deleting remaining Edge files..."
-# EdgeUpdate and EdgeWebView are deliberately kept -- WebView2 Runtime shares
-# both with the Edge browser, and apps like Stremio, WhatsApp Desktop, and
-# many other Electron/webview-based apps depend on WebView2 even with the
-# Edge browser itself removed.
 $edgeDirs = @(
     "C:\Program Files (x86)\Microsoft\Edge",
     "C:\Program Files (x86)\Microsoft\EdgeCore",
@@ -324,18 +286,12 @@ foreach ($dir in $edgeDirs) {
     }
 }
 
-# Step 3: Remove Edge shortcuts
 Remove-Item "$env:PUBLIC\Desktop\Microsoft Edge.lnk"      -Force -ErrorAction SilentlyContinue
 Remove-Item "$env:USERPROFILE\Desktop\Microsoft Edge.lnk" -Force -ErrorAction SilentlyContinue
 Remove-Item "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Microsoft Edge.lnk" -Force -ErrorAction SilentlyContinue
 
-# Step 4: Disable Edge-browser-only services (leave edgeupdate/edgeupdatem
-# running -- WebView2 needs the updater service to install/repair itself)
 'MicrosoftEdgeElevationService' | ForEach-Object { Disable-Svc $_ }
 
-# Step 5: Apply registry blocks to prevent the Edge *browser* coming back,
-# while explicitly re-allowing the WebView2 Runtime (separate product, same
-# updater) so apps that depend on it keep working.
 Set-Reg 'HKLM:\SOFTWARE\Microsoft\EdgeUpdate'          'DoNotUpdateToEdgeWithChromium' 'DWord'  1
 Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\EdgeUpdate' 'UpdateDefault'                 'DWord'  0
 Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\EdgeUpdate' 'InstallDefault'                'DWord'  0
@@ -348,20 +304,14 @@ Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Edge'       'BackgroundModeEnabled'  
 Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Edge'       'StartupBoostEnabled'           'DWord'  0
 Set-RegOwned 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MicrosoftEdge' 'IsEdgeStableSetupDone' 'DWord' 1
 
-# Make sure the updater services WebView2 relies on are not disabled
-# (edgeupdate defaults to Automatic, edgeupdatem to Manual)
 Set-Service -Name 'edgeupdate'  -StartupType Automatic -ErrorAction SilentlyContinue
 Set-Service -Name 'edgeupdatem' -StartupType Manual    -ErrorAction SilentlyContinue
 
-# Block Windows Update from pushing Edge back (this is a key, not a value)
 Remove-Item -LiteralPath 'HKLM:\SOFTWARE\Microsoft\WindowsUpdate\Orchestrator\UScheduler_Oobe\EdgeUpdate' `
     -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Ok "Edge browser removed and blocked (WebView2 Runtime kept)"
 
-# ============================================================
-#  4. DISABLE XBOX / GAMEBAR SERVICES
-# ============================================================
 Write-Title "4. Disabling Xbox and GameBar services..."
 
 'XblAuthManager','XblGameSave','XboxGipSvc','XboxNetApiSvc' | ForEach-Object { Disable-Svc $_ }
@@ -375,32 +325,13 @@ Set-Reg 'HKCU:\SOFTWARE\Microsoft\GameBar'                    'AllowAutoGameMode
 
 Write-Ok "Xbox and GameBar disabled"
 
-# ============================================================
-#  5. DISABLE PRIVACY-INVASIVE SERVICES
-# ============================================================
 Write-Title "5. Disabling privacy-invasive services..."
 
-# Only genuine telemetry/tracking/bloat services are disabled here. Services
-# that other apps and features depend on are deliberately LEFT ENABLED so your
-# apps keep working:
-#   DPS      - Diagnostic Policy Service (all Windows troubleshooters + the
-#              Network troubleshooter you'd use for Mobile Hotspot)
-#   PcaSvc   - Program Compatibility Assistant (breaks app-compat + throws
-#              pcasvc.dll errors on 24H2 if disabled)
-#   lfsvc    - Geolocation (auto time-zone, Find My Device, weather; can also
-#              affect the Wi-Fi/SoftAP stack behind Mobile Hotspot)
-#   PhoneSvc - telephony state (Phone Link, cellular on laptops)
-#   MapsBroker - Windows Maps platform used by third-party apps
-#   SysMain  - memory/prefetch (Microsoft recommends leaving it on)
-#   TrkWks   - link tracking (resolves shortcuts across drives)
 @('DiagTrack','dmwappushservice','RemoteRegistry','WerSvc',
   'WMPNetworkSvc','WpcMonSvc','wisvc','RetailDemo') | ForEach-Object { Disable-Svc $_ }
 
 Write-Ok "Telemetry/tracking services disabled (app-critical services left enabled)"
 
-# Telemetry scheduled tasks are DISABLED, never deleted: deleting task files
-# leaves orphaned Task Scheduler entries ("task image is corrupt") and some
-# folders (InstallService, CloudExperienceHost) are needed by Store/OOBE.
 $telemetryTasks = @(
     @('\Microsoft\Windows\Application Experience\', 'Microsoft Compatibility Appraiser'),
     @('\Microsoft\Windows\Application Experience\', 'Microsoft Compatibility Appraiser Exp'),
@@ -423,9 +354,6 @@ foreach ($t in $telemetryTasks) {
 }
 Write-Ok "Telemetry scheduled tasks disabled"
 
-# ============================================================
-#  6. TELEMETRY & DATA COLLECTION
-# ============================================================
 Write-Title "6. Applying telemetry and privacy tweaks..."
 
 Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection'                'AllowTelemetry'                              'DWord' 0
@@ -438,11 +366,6 @@ Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AdvertisingInfo'             
 Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System'                        'EnableActivityFeed'                          'DWord' 0
 Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System'                        'PublishUserActivities'                       'DWord' 0
 Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System'                        'UploadUserActivities'                        'DWord' 0
-# NOTE: Location is intentionally NOT hard-disabled by policy. Telemetry is
-# already off (AllowTelemetry=0), and forcing location off breaks auto
-# time-zone, Find My Device and weather, and can interfere with the Wi-Fi/
-# SoftAP stack behind Mobile Hotspot. Location stays user-controllable in
-# Settings > Privacy & security > Location.
 Set-Reg 'HKCU:\Software\Microsoft\InputPersonalization'                           'RestrictImplicitInkCollection'               'DWord' 1
 Set-Reg 'HKCU:\Software\Microsoft\InputPersonalization'                           'RestrictImplicitTextCollection'              'DWord' 1
 Set-Reg 'HKCU:\Software\Microsoft\InputPersonalization\TrainedDataStore'          'HarvestContacts'                             'DWord' 0
@@ -451,18 +374,11 @@ Set-Reg 'HKCU:\Software\Microsoft\Speech_OneCore\Settings\OnlineSpeechPrivacy'  
 Set-Reg 'HKCU:\Software\Microsoft\Input\TIPC'                                     'Enabled'                                     'DWord' 0
 Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Error Reporting'       'Disabled'                                    'DWord' 1
 
-# Deny apps access to system DIAGNOSTIC INFO only (a telemetry vector with no
-# legitimate app need). Camera / microphone / location / contacts / etc. are
-# left USER-CONTROLLED in Settings rather than force-denied by policy, so apps
-# that need them (Discord, OBS, Zoom, camera apps, etc.) keep working.
 $ap = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy'
 Set-Reg $ap 'LetAppsGetDiagnosticInfo' 'DWord' 2
 
 Write-Ok "Telemetry and privacy tweaks applied"
 
-# ============================================================
-#  7. CONTENT DELIVERY / SPONSORED APPS
-# ============================================================
 Write-Title "7. Disabling sponsored apps and content delivery..."
 
 $cdm = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager'
@@ -481,9 +397,6 @@ Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\PushToInstall'        'DisablePushToI
 
 Write-Ok "Content delivery and sponsored apps disabled"
 
-# ============================================================
-#  8. COPILOT / AI / RECALL / BING
-# ============================================================
 Write-Title "8. Disabling Copilot, Recall, Bing and AI features..."
 
 Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot' 'TurnOffWindowsCopilot'      'DWord' 1
@@ -492,22 +405,11 @@ Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI'      'TurnOffSavin
 Set-Reg 'HKCU:\Software\Policies\Microsoft\Windows\Explorer'        'DisableSearchBoxSuggestions' 'DWord' 1
 Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer'        'DisableSearchBoxSuggestions' 'DWord' 1
 
-# Recall is fully neutralized by the policy keys above (DisableAIDataAnalysis +
-# TurnOffSavingSnapshots): it takes no snapshots and performs no AI analysis.
-# We deliberately do NOT remove the Recall optional feature -- on Windows 11
-# 24H2, removing the component also breaks the modern File Explorer UI. Policy-
-# disabling keeps Explorer intact while Recall stays off.
-
 Write-Ok "Copilot, Recall and AI features disabled (Recall neutralized by policy, not removed)"
 
-# ============================================================
-#  9. TASKBAR / UI
-# ============================================================
 Write-Title "9. Cleaning up Taskbar and UI..."
 
 $adv = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'
-# TaskbarDa and some Explorer\Advanced keys are ACL-protected -- take ownership first
-# TaskbarMn/Da are ACL-protected -- reg.exe bypasses .NET registry check
 & reg add 'HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' /v TaskbarMn /t REG_DWORD /d 0 /f 2>&1 | Out-Null
 & reg add 'HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' /v TaskbarDa /t REG_DWORD /d 0 /f 2>&1 | Out-Null
 Set-Reg $adv 'ShowTaskViewButton'     'DWord' 0
@@ -519,11 +421,8 @@ Set-Reg $adv 'Start_TrackDocs'        'DWord' 0
 Set-Reg $adv 'EnableSnapAssistFlyout' 'DWord' 0
 Set-Reg $adv 'Start_IrisRecommendations'   'DWord' 0
 Set-Reg $adv 'Start_AccountNotifications'  'DWord' 0
-# "Recommended" section on the Start menu (Windows 11 24H2+ needs this key
-# too, Start_IrisRecommendations alone isn't enough to fully hide it)
 Set-Reg $adv 'HideRecommendedSection' 'DWord' 1
 Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer' 'HideRecommendedSection' 'DWord' 1
-# Show seconds in the taskbar clock
 Set-Reg $adv 'ShowSecondsInSystemClock' 'DWord' 1
 Set-Reg 'HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32' '' 'String' ''
 Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Dsh'                                   'AllowNewsAndInterests'   'DWord'  0
@@ -532,16 +431,11 @@ Set-Reg 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Search'                
 Set-Reg 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Start'                   'ShowRecentList'          'DWord'  0
 Set-Reg 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Start'                   'ShowFrequentList'        'DWord'  0
 
-# Unpin Microsoft Store from the taskbar. The layout-XML mechanism in the
-# unattend answer file already tries to ship an empty taskbar pin list, but
-# it only applies cleanly to brand-new profiles created after imaging; this
-# is a direct, always-works fallback that runs against whatever is pinned
-# right now, using the same "Unpin from taskbar" verb the shell itself uses.
 try {
     $storeApp = @(Get-StartApps | Where-Object { $_.AppID -like '*WindowsStore*' })[0]
     if ($storeApp) {
         $shellApp = New-Object -ComObject Shell.Application
-        $folder = $shellApp.NameSpace('shell:::{4234d49b-0245-4df3-b780-3893943456e1}') # Apps folder
+        $folder = $shellApp.NameSpace('shell:::{4234d49b-0245-4df3-b780-3893943456e1}')
         $item = @(@($folder.Items()) | Where-Object { $_.Path -eq $storeApp.AppID })[0]
         if ($item) {
             $verb = @(@($item.Verbs()) | Where-Object { ($_.Name -replace '&','') -match 'unpin.*taskbar' })[0]
@@ -557,10 +451,6 @@ try {
 
 Write-Ok "Taskbar and UI cleaned up"
 
-# ============================================================
-#  10. DARK THEME
-#  Must restart Explorer after setting to take effect properly
-# ============================================================
 Write-Title "10. Applying dark theme..."
 
 $themePath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
@@ -569,10 +459,8 @@ Set-Reg $themePath 'AppsUseLightTheme'    'DWord' 0
 Set-Reg $themePath 'EnableTransparency'   'DWord' 1
 Set-Reg $themePath 'ColorPrevalence'      'DWord' 0
 
-# Accent colour (Windows blue #0078D4)
 Set-Reg 'HKCU:\Software\Microsoft\Windows\DWM' 'ColorPrevalence' 'DWord' 0
 
-# Broadcast theme change to all windows so it takes effect immediately
 try {
     Add-Type -TypeDefinition @"
 using System;
@@ -587,20 +475,17 @@ public class NiixWin32 {
     [NiixWin32]::SendMessageTimeout([IntPtr]0xffff, 0x1A, [IntPtr]::Zero, 'ImmersiveColorSet', 0x2, 5000, [ref]$result) | Out-Null
 } catch {}
 
-# Restart Explorer so theme applies visually right now
-Write-Body "Restarting Explorer to apply theme..."
-Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
-Start-Sleep -Seconds 2
-# Explorer auto-restarts; if not, force it
-if (-not (Get-Process explorer -ErrorAction SilentlyContinue)) {
-    Start-Process explorer
+if (-not $Background) {
+    Write-Body "Restarting Explorer to apply theme..."
+    Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+    if (-not (Get-Process explorer -ErrorAction SilentlyContinue)) {
+        Start-Process explorer
+    }
 }
 
 Write-Ok "Dark theme applied"
 
-# ============================================================
-#  11. ONEDRIVE
-# ============================================================
 Write-Title "11. Removing OneDrive..."
 
 try {
@@ -619,12 +504,8 @@ try {
 Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OneDrive' 'DisableFileSyncNGSC'                   'DWord' 1
 Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OneDrive' 'DisableLibrariesDefaultSaveToOneDrive' 'DWord' 1
 
-# ============================================================
-#  12. WINDOWS UPDATE POLICY
-# ============================================================
 Write-Title "12. Configuring Windows Update..."
 
-# Remove the OOBE-time suppression keys (they were written to prevent updates during setup)
 'NoAutoUpdate','AUOptions','UseWUServer' | ForEach-Object {
     Remove-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' $_ -Force -ErrorAction SilentlyContinue
 }
@@ -632,20 +513,15 @@ Write-Title "12. Configuring Windows Update..."
     Remove-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate' $_ -Force -ErrorAction SilentlyContinue
 }
 
-# Auto-download, notify to install, no auto-restart while signed in, no P2P
 Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' 'NoAutoUpdate'                  'DWord' 0
 Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' 'AUOptions'                     'DWord' 3
 Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' 'NoAutoRebootWithLoggedOnUsers' 'DWord' 1
 Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization' 'DODownloadMode' 'DWord' 0
 
-# Restore the service the ISO disabled for OOBE (WaaSMedicSvc is protected
-# and was never touched, so it is not changed here)
 try {
     Set-Service -Name 'wuauserv' -StartupType Manual -ErrorAction Stop
 } catch { Write-Warn "wuauserv startup type: $($_.Exception.Message)" }
 
-# Actually start them now rather than waiting for next reboot, and reset the
-# WU client's local state in case it's stuck from the offline suppression
 try {
     Stop-Service -Name wuauserv -Force -ErrorAction SilentlyContinue
     Start-Service -Name BITS      -ErrorAction SilentlyContinue
@@ -658,12 +534,11 @@ if ((Get-Service -Name 'wuauserv' -ErrorAction SilentlyContinue).StartType -eq '
 }
 Write-Ok "Windows Update configured (auto-download, notify to install, no auto-restart, no P2P)"
 
-# ============================================================
-#  13. BITLOCKER
-# ============================================================
 Write-Title "13. Checking BitLocker..."
 
-try {
+if ($Background) {
+    Write-Body "Background mode: BitLocker state left as-is"
+} else { try {
     $bl = Get-BitLockerVolume -MountPoint $env:SystemDrive -ErrorAction SilentlyContinue
     if ($bl -and $bl.ProtectionStatus -eq 'On') {
         Disable-BitLocker -MountPoint $env:SystemDrive -ErrorAction Stop | Out-Null
@@ -671,12 +546,9 @@ try {
     } else {
         Write-Body "BitLocker not active"
     }
-} catch { Write-Warn "BitLocker: $_" }
+} catch { Write-Warn "BitLocker: $_" } }
 Set-Reg 'HKLM:\SYSTEM\CurrentControlSet\Control\BitLocker' 'PreventDeviceEncryption' 'DWord' 1
 
-# ============================================================
-#  14. MISCELLANEOUS
-# ============================================================
 Write-Title "14. Miscellaneous hardening..."
 
 Set-Reg 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' 'LongPathsEnabled'                 'DWord' 1
@@ -692,55 +564,32 @@ try {
 
 Write-Ok "Miscellaneous hardening done"
 
-# ============================================================
-#  15. PRIVACY EXTRAS
-# ============================================================
 Write-Title "15. Additional privacy tweaks..."
 
-# Stop Defender uploading your files to Microsoft (SubmitSamplesConsent=2,
-# "never send"). Cloud-delivered protection (MAPS lookups by file hash /
-# metadata) is deliberately KEPT ON: it is Defender's main defence against
-# brand-new malware. A SpynetReporting=0 left by an older build is removed.
 Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Spynet' 'SubmitSamplesConsent' 'DWord' 2
 Remove-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Spynet' -Name 'SpynetReporting' -Force -ErrorAction SilentlyContinue
 
-# Clipboard: stop clipboard history syncing to your Microsoft account across
-# devices, and stop the "suggested actions" popup (phone numbers/dates in
-# copied text triggering app suggestions) from scanning what you copy.
 Set-Reg 'HKCU:\Software\Microsoft\Clipboard'                                     'CloudClipboardAutomaticUpload' 'DWord' 0
 Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System'                       'AllowCrossDeviceClipboard'     'DWord' 0
 Set-Reg 'HKCU:\Software\Microsoft\Windows\CurrentVersion\SmartActionPlatform\SmartClipboard' 'Disabled' 'DWord' 1
 
 Write-Ok "Privacy extras applied (Defender sample submission, clipboard cloud sync/suggestions)"
 
-# ============================================================
-#  16. PERFORMANCE & POWER (auto: desktop vs laptop)
-# ============================================================
 if ($script:IsLaptop) {
     Write-Title "16. Performance tweaks (laptop detected -- battery-safe profile)..."
 } else {
     Write-Title "16. Performance and power tweaks (desktop detected)..."
 }
 
-# --- Tweaks that are safe and beneficial on BOTH desktops and laptops --------
-
-# Reclaim the ~7GB Windows sets aside for itself ("Reserved Storage"). Small
-# risk: on a nearly-full drive, a future cumulative update could occasionally
-# fail without this space reserved -- not a concern with normal free space.
 try {
     Set-WindowsReservedStorageState -State Disabled -ErrorAction Stop
     Write-Ok "Reserved Storage disabled (~7GB reclaimed)"
 } catch { Write-Warn "Reserved Storage: $_" }
 
-# Stop Windows updating NTFS "last accessed" timestamps on every file touch --
-# a small, free reduction in disk writes with no real downside.
 fsutil.exe behavior set disablelastaccess 1 2>&1 | Out-Null
 if ($LASTEXITCODE -eq 0) { Write-Ok "NTFS last-access timestamps disabled" }
 else { Write-Warn "fsutil disablelastaccess failed (exit $LASTEXITCODE)" }
 
-# MMCSS network/multimedia scheduling: stop Windows throttling background
-# network and audio processing in favor of foreground apps. Standard,
-# well-known low-latency tweak for gaming/streaming.
 $mmcss = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile'
 Set-Reg $mmcss                              'SystemResponsiveness'   'DWord' 0
 Set-Reg $mmcss                              'NetworkThrottlingIndex' 'DWord' 0xffffffff
@@ -751,17 +600,11 @@ Set-Reg $mmcssGames 'SFIO Priority'         'String' 'High'
 Write-Ok "Network throttling disabled, Games task priority raised"
 
 if (-not $script:IsLaptop) {
-    # --- DESKTOP-ONLY: battery management is irrelevant, so go aggressive ----
 
-    # Turn off hibernation entirely -- reclaims disk space equal to installed
-    # RAM (hiberfil.sys). Also disables Fast Startup (which relies on it).
     powercfg.exe /hibernate off 2>&1 | Out-Null
     if ($LASTEXITCODE -eq 0) { Write-Ok "Hibernation disabled, Fast Startup off (disk space reclaimed)" }
     else { Write-Warn "Disabling hibernation failed (exit $LASTEXITCODE)" }
 
-    # Power plan -> High performance FIRST, so the USB setting below lands on
-    # the plan that is actually active. If the plan is hidden/missing (common
-    # on OEM images) it is restored from its built-in template.
     $highPerfGuid = '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c'
     powercfg.exe /setactive $highPerfGuid 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) {
@@ -773,8 +616,6 @@ if (-not $script:IsLaptop) {
     if ($LASTEXITCODE -eq 0) { Write-Ok "Power plan set to High performance" }
     else { Write-Warn "High performance power plan is not available on this system (Modern Standby devices only offer Balanced)" }
 
-    # USB selective suspend off (AC) on the active plan -- stops mice, audio
-    # interfaces and controllers power-cycling when briefly idle.
     $activeOut = (powercfg.exe /getactivescheme 2>&1 | Out-String)
     if ($activeOut -match '([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})') {
         $activeScheme = $Matches[1]
@@ -788,30 +629,57 @@ if (-not $script:IsLaptop) {
 
     Write-Ok "Desktop performance/power tweaks done"
 } else {
-    # --- LAPTOP: preserve battery life and mobility -------------------------
-    # Hibernation / Fast Startup: LEFT ON (you want Sleep -> Hibernate).
-    # USB selective suspend: LEFT ON (saves battery).
-    # Power plan: LEFT on the battery-aware Balanced/OEM plan. For gaming
-    # sessions, plug in and pick a higher-performance plan manually, or use
-    # your laptop vendor's performance mode -- forcing High performance
-    # system-wide would drain the battery even on the desktop.
     Write-Body "Laptop detected: hibernation, USB power management and the battery-aware power plan left intact."
     Write-Ok "Laptop-safe performance tweaks done (gaming/latency tweaks applied, battery settings preserved)"
 }
 
-# ============================================================
-#  17. TIME SYNCHRONISATION
-# ============================================================
-Write-Title "17. Configuring automatic time sync..."
+Write-Title "17. Configuring automatic time sync (Cloudflare, re-synced at every login)..."
 
-# Why the clock drifts on a stock install: on a PC that is not joined to a
-# domain, the Windows Time service (W32Time) is "Manual (Trigger Start)" and
-# its only trigger is domain-join. It therefore only runs when the weekly
-# "SynchronizeTime" scheduled task wakes it, syncs once, and stops again --
-# so the clock free-runs on the motherboard RTC for up to 7 days and drifts.
-# Fix: run W32Time permanently (delayed auto-start, trigger removed), use
-# several reliable NTP servers, and poll every hour. Secure Time Seeding and
-# the default phase-correction safety limits are deliberately left as-is.
+$timeSyncScript = @'
+param([int]$Attempts = 12, [int]$DelaySeconds = 10)
+
+$ErrorActionPreference = 'SilentlyContinue'
+$w32tm   = Join-Path $env:SystemRoot 'System32\w32tm.exe'
+$logFile = Join-Path $env:SystemRoot 'Setup\Scripts\NiixTimeSync.log'
+$log     = [System.Collections.Generic.List[string]]::new()
+function Log($m) { $log.Add(('{0:yyyy-MM-dd HH:mm:ss}  {1}' -f (Get-Date), $m)) }
+
+$svcKey = 'HKLM:\SYSTEM\CurrentControlSet\Services\W32Time'
+$ntpKey = "$svcKey\TimeProviders\NtpClient"
+$cfgKey = "$svcKey\Config"
+
+Set-ItemProperty -Path $ntpKey -Name 'Enabled'             -Type DWord -Value 1
+Set-ItemProperty -Path $ntpKey -Name 'SpecialPollInterval' -Type DWord -Value 3600
+Set-ItemProperty -Path $cfgKey -Name 'MaxPosPhaseCorrection' -Type DWord -Value -1
+Set-ItemProperty -Path $cfgKey -Name 'MaxNegPhaseCorrection' -Type DWord -Value -1
+Set-ItemProperty -Path $cfgKey -Name 'UtilizeSslTimeData'    -Type DWord -Value 0
+
+if ((Get-Service W32Time).Status -ne 'Running') { Start-Service W32Time }
+
+& $w32tm /config /syncfromflags:NO /update | Out-Null
+Log "Auto time sync switched OFF (exit $LASTEXITCODE)"
+Start-Sleep -Seconds 2
+
+& $w32tm /config /manualpeerlist:"time.cloudflare.com,0x9" /syncfromflags:manual /reliable:no /update | Out-Null
+Log "Auto time sync switched ON with time.cloudflare.com (exit $LASTEXITCODE)"
+
+Restart-Service W32Time -Force
+(Get-Service W32Time).WaitForStatus('Running', [TimeSpan]::FromSeconds(30))
+
+$synced = $false
+for ($i = 1; $i -le $Attempts; $i++) {
+    $out = & $w32tm /resync /rediscover 2>&1 | Out-String
+    if ($LASTEXITCODE -eq 0) { $synced = $true; Log "Resync OK on attempt $i"; break }
+    Log ("Resync attempt $i failed: " + $out.Trim())
+    if ($i -lt $Attempts) { Start-Sleep -Seconds $DelaySeconds }
+}
+
+$status = & $w32tm /query /status 2>&1 | Out-String
+Log ("Status:`r`n" + $status.Trim())
+Set-Content -Path $logFile -Value $log -Encoding ASCII
+if ($synced) { exit 0 } else { exit 1 }
+'@
+
 $w32tm = Join-Path $env:SystemRoot 'System32\w32tm.exe'
 $scExe = Join-Path $env:SystemRoot 'System32\sc.exe'
 
@@ -819,6 +687,9 @@ if (-not (Get-Service -Name 'W32Time' -ErrorAction SilentlyContinue)) {
     $r = Invoke-Quiet $w32tm '/register'
     if ($r.ExitCode -ne 0) { Write-Warn "w32tm /register failed (exit $($r.ExitCode))" }
 }
+
+Set-Reg 'HKLM:\SYSTEM\CurrentControlSet\Control\TimeZoneInformation' 'RealTimeIsUniversal' 'QWord' 1
+Write-Ok "Hardware clock treated as UTC (fixes dual-boot clock offset)"
 
 $timeSvc = Get-Service -Name 'W32Time' -ErrorAction SilentlyContinue
 if (-not $timeSvc) {
@@ -833,44 +704,149 @@ if (-not $timeSvc) {
     $r = Invoke-Quiet $scExe 'failure W32Time reset= 86400 actions= restart/60000/restart/60000/restart/60000'
     if ($r.ExitCode -ne 0) { Write-Warn "W32Time recovery actions failed (exit $($r.ExitCode))" }
 
-    try {
-        Start-Service -Name 'W32Time' -ErrorAction Stop
-        (Get-Service -Name 'W32Time').WaitForStatus('Running', [TimeSpan]::FromSeconds(30))
-    } catch { Write-Warn "Could not start W32Time: $($_.Exception.Message)" }
-
-    $r = Invoke-Quiet $w32tm '/config /manualpeerlist:"time.windows.com,0x9 time.cloudflare.com,0x9 pool.ntp.org,0x9" /syncfromflags:manual /reliable:no /update'
-    if ($r.ExitCode -ne 0) { Write-Warn "w32tm /config failed (exit $($r.ExitCode)): $($r.Output.Trim())" }
-
-    $ntpClient = 'HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\TimeProviders\NtpClient'
-    Set-Reg $ntpClient 'Enabled'             'DWord' 1
-    Set-Reg $ntpClient 'SpecialPollInterval' 'DWord' 3600
-
-    $r = Invoke-Quiet $w32tm '/config /update'
-    if ($r.ExitCode -ne 0) { Write-Warn "w32tm /config /update failed (exit $($r.ExitCode))" }
-
     $syncTask = Get-ScheduledTask -TaskPath '\Microsoft\Windows\Time Synchronization\' -TaskName 'SynchronizeTime' -ErrorAction SilentlyContinue
     if ($syncTask -and $syncTask.State -eq 'Disabled') {
         try { $syncTask | Enable-ScheduledTask -ErrorAction Stop | Out-Null }
         catch { Write-Warn "Could not enable SynchronizeTime task: $($_.Exception.Message)" }
     }
 
-    $r = Invoke-Quiet $w32tm '/resync /rediscover'
-    if ($r.ExitCode -eq 0) {
-        Write-Ok "Clock synced now; W32Time always running, re-syncs every hour"
-    } else {
-        Write-Body "No time server reachable right now -- the clock will sync automatically once online."
-        Write-Ok "W32Time always running, re-syncs every hour"
+    $tsDir  = Join-Path $env:SystemRoot 'Setup\Scripts'
+    $tsPath = Join-Path $tsDir 'NiixTimeSync.ps1'
+    try {
+        New-Item -ItemType Directory -Path $tsDir -Force -ErrorAction Stop | Out-Null
+        [System.IO.File]::WriteAllText($tsPath, ($timeSyncScript -replace "`r?`n", "`r`n"), [System.Text.Encoding]::ASCII)
+    } catch { Write-Warn "Could not write $tsPath : $($_.Exception.Message)" }
+
+    try {
+        $tsAction    = New-ScheduledTaskAction -Execute 'powershell.exe' `
+                         -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$tsPath`""
+        $tsTrigger   = New-ScheduledTaskTrigger -AtLogOn
+        $tsTrigger.Delay = 'PT10S'
+        $tsPrincipal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+        $tsSettings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+                         -StartWhenAvailable -MultipleInstances IgnoreNew `
+                         -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
+        Register-ScheduledTask -TaskName 'NiixTimeSync' -TaskPath '\' -Action $tsAction -Trigger $tsTrigger `
+            -Principal $tsPrincipal -Settings $tsSettings `
+            -Description 'Toggles automatic time sync off/on and resyncs with time.cloudflare.com at every login (niix-debloat).' `
+            -Force -ErrorAction Stop | Out-Null
+        Write-Ok "NiixTimeSync task registered (runs at every login)"
+    } catch { Write-Warn "Could not register NiixTimeSync task: $($_.Exception.Message)" }
+
+    if ($Background) {
+        Write-Ok "Time sync settings re-applied (NiixTimeSync task handles the resync)"
+    } elseif (Test-Path $tsPath) {
+        $psExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $r = Invoke-Quiet $psExe "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$tsPath`" -Attempts 3 -DelaySeconds 5"
+        if ($r.ExitCode -eq 0) {
+            Write-Ok "Clock synced now with time.cloudflare.com; re-syncs hourly and at every login"
+        } else {
+            Write-Body "Cloudflare time server not reachable right now -- the clock will sync at next login / within the hour."
+            Write-Ok "Time sync configured (Cloudflare only, hourly + at every login)"
+        }
     }
 }
 
-# ============================================================
-#  DONE
-# ============================================================
+Write-Title "18. Adding hosts file blocks..."
+
+$hostsBlock = @(
+    @('127.0.0.1', 'localhost'),
+    @('::1',       'localhost'),
+    @('127.0.0.1', 'data.microsoft.com'),
+    @('127.0.0.1', 'msftconnecttest.com'),
+    @('127.0.0.1', 'azureedge.net'),
+    @('127.0.0.1', 'activity.windows.com'),
+    @('127.0.0.1', 'bingapis.com'),
+    @('127.0.0.1', 'msedge.net'),
+    @('127.0.0.1', 'assets.msn.com'),
+    @('127.0.0.1', 'scorecardresearch.com'),
+    @('127.0.0.1', 'edge.microsoft.com'),
+    @('127.0.0.1', 'data.msn.com')
+)
+$hostsPath   = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'
+$markerStart = '# >>> niix-debloat blocks (managed by niix-tweaks.ps1) >>>'
+$markerEnd   = '# <<< niix-debloat blocks <<<'
+
+try {
+    $existing = @()
+    if (Test-Path -LiteralPath $hostsPath) {
+        $item = Get-Item -LiteralPath $hostsPath -Force
+        if ($item.IsReadOnly) { $item.IsReadOnly = $false }
+        $existing = @([System.IO.File]::ReadAllLines($hostsPath))
+    }
+
+    $kept = [System.Collections.Generic.List[string]]::new()
+    $inBlock = $false
+    foreach ($line in $existing) {
+        if ($line.Trim() -eq $markerStart) { $inBlock = $true;  continue }
+        if ($line.Trim() -eq $markerEnd)   { $inBlock = $false; continue }
+        if (-not $inBlock) { $kept.Add($line) }
+    }
+    while ($kept.Count -gt 0 -and $kept[$kept.Count - 1].Trim() -eq '') { $kept.RemoveAt($kept.Count - 1) }
+
+    $present = @{}
+    foreach ($line in $kept) {
+        $l = ($line -replace '#.*$', '').Trim()
+        if ($l) {
+            $parts = $l -split '\s+'
+            foreach ($n in $parts[1..($parts.Count - 1)]) { $present["$($parts[0])|$($n.ToLower())"] = $true }
+        }
+    }
+
+    $block = [System.Collections.Generic.List[string]]::new()
+    $block.Add($markerStart)
+    foreach ($e in $hostsBlock) {
+        if (-not $present["$($e[0])|$($e[1])"]) { $block.Add(('{0,-15} {1}' -f $e[0], $e[1])) }
+    }
+    $block.Add($markerEnd)
+
+    $out = @($kept) + @('') + @($block)
+    [System.IO.File]::WriteAllText($hostsPath, (($out -join "`r`n") + "`r`n"), [System.Text.Encoding]::ASCII)
+
+    $null = Invoke-Quiet (Join-Path $env:SystemRoot 'System32\ipconfig.exe') '/flushdns'
+    Write-Ok "Hosts file updated ($($block.Count - 2) entries) and DNS cache flushed"
+} catch {
+    Write-Warn "Could not update hosts file: $($_.Exception.Message)"
+}
+
+if (-not $Background) {
+    Write-Title "19. Scheduling background re-apply at every login..."
+
+    $maintDir  = Join-Path $env:SystemRoot 'Setup\Scripts'
+    $maintPath = Join-Path $maintDir 'niix-tweaks.ps1'
+    try {
+        New-Item -ItemType Directory -Path $maintDir -Force -ErrorAction Stop | Out-Null
+        if ($PSCommandPath -and ((Resolve-Path -LiteralPath $PSCommandPath).Path -ne $maintPath)) {
+            Copy-Item -LiteralPath $PSCommandPath -Destination $maintPath -Force -ErrorAction Stop
+        }
+    } catch { Write-Warn "Could not copy script to $maintPath : $($_.Exception.Message)" }
+
+    if (Test-Path -LiteralPath $maintPath) {
+        try {
+            $maintAction = New-ScheduledTaskAction -Execute (Join-Path $env:SystemRoot 'System32\conhost.exe') `
+                -Argument ("--headless `"$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe`" " +
+                           "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden " +
+                           "-File `"$maintPath`" -Background")
+            $maintTrigger = New-ScheduledTaskTrigger -AtLogOn
+            $maintTrigger.Delay = 'PT1M'
+            $maintPrincipal = New-ScheduledTaskPrincipal -GroupId 'BUILTIN\Administrators' -RunLevel Highest
+            $maintSettings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+                                -StartWhenAvailable -MultipleInstances IgnoreNew `
+                                -ExecutionTimeLimit (New-TimeSpan -Minutes 30)
+            Register-ScheduledTask -TaskName 'NiixTweaksMaintain' -TaskPath '\' -Action $maintAction `
+                -Trigger $maintTrigger -Principal $maintPrincipal -Settings $maintSettings `
+                -Description 'Silently re-applies niix-tweaks at every login so Windows updates cannot undo them.' `
+                -Force -ErrorAction Stop | Out-Null
+            Write-Ok "NiixTweaksMaintain task registered (silent re-apply 1 min after every login)"
+        } catch { Write-Warn "Could not register NiixTweaksMaintain task: $($_.Exception.Message)" }
+    }
+}
+
 Write-Host ""
-Write-Host "  +----------------------------------------------------------+" -ForegroundColor $ClrCyan
+Write-Host "  +----------------------------------------------------------+" -ForegroundColor $PINK
 
 if ($warnings.Count -eq 0) {
-    Write-Host "  |   [OK]  All tweaks applied with no warnings.             |" -ForegroundColor $ClrCyan
+    Write-Host "  |   [OK]  All tweaks applied with no warnings.             |" -ForegroundColor $GREEN
 } else {
     Write-Host ("  |   {0,-55}|" -f "Done with $($warnings.Count) warning(s):") -ForegroundColor Yellow
     foreach ($warnItem in $warnings) {
@@ -879,14 +855,11 @@ if ($warnings.Count -eq 0) {
     }
 }
 
-Write-Host "  |                                                          |" -ForegroundColor $ClrCyan
-Write-Host "  |   A restart is required to fully apply all changes.      |" -ForegroundColor $ClrCyan
-Write-Host "  +----------------------------------------------------------+" -ForegroundColor $ClrCyan
+Write-Host "  |                                                          |" -ForegroundColor $PINK
+Write-Host "  |   A restart is required to fully apply all changes.      |" -ForegroundColor $PINK
+Write-Host "  +----------------------------------------------------------+" -ForegroundColor $PINK
 Write-Host ""
 
-# Pull the OOBE-phase logs (Specialize/UserOnce/DefaultUser/FirstLogon) into
-# the same folder as this transcript, so everything needed to troubleshoot
-# is in one place under Documents\NiixDebloat-Logs.
 try {
     $phaseLogs = @(
         'C:\Windows\Setup\Scripts\Specialize.log',
@@ -904,6 +877,8 @@ try {
 } catch { Write-Warn "Copying phase logs: $_" }
 
 try { Stop-Transcript | Out-Null } catch { }
+
+if ($Background) { exit 0 }
 
 $resp = Read-Host "  Restart now? [Y/N]"
 if ($resp -match '^[Yy]') { Restart-Computer -Force }

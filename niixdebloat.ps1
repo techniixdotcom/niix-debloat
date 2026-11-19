@@ -1,20 +1,3 @@
-<#
-.SYNOPSIS
-    niixdebloat.ps1  -  All-in-one Windows 11 ISO Debloat & Privacy Hardener
-.DESCRIPTION
-    Reads unattend.xml and niix-tweaks.ps1 (plain text, no Base64) from the
-    same folder as this script and bakes them into a customized Windows 11 ISO.
-    Drop next to (or browse for) a Win11 ISO and run.
-.NOTES
-    Based on WinUtil by Chris Titus (@christitustech) -- customised by niix
-    Runs under Windows PowerShell 5.1 (built into Windows). If started from
-    PowerShell 7 or without admin rights it relaunches itself correctly.
-#>
-
-# ===========================================================================
-#  SELF-ELEVATE / FORCE WINDOWS POWERSHELL 5.1
-#  (DISM, Storage and AppX modules are only fully native in 5.1)
-# ===========================================================================
 if (-not $PSCommandPath) {
     Write-Host "Save this script to a file and run it with -File; it cannot be pasted into a console." -ForegroundColor Red
     exit 1
@@ -36,35 +19,51 @@ $GREEN = 'Green'
 $WHITE = 'White'
 $RED   = 'Red'
 
-function Write-Banner  { param([string]$t) Write-Host $t -ForegroundColor $PINK }
-function Write-Title   { param([string]$t) Write-Host ""; Write-Host "  $t" -ForegroundColor $PINK; Write-Host "" }
-function Write-Body    { param([string]$t) Write-Host "  $t" -ForegroundColor $WHITE }
-function Write-Success { param([string]$t) Write-Host "  [OK] $t" -ForegroundColor $GREEN }
-function Write-Err     { param([string]$t) Write-Host "  [ERROR] $t" -ForegroundColor $RED }
-function Write-Warn    { param([string]$t) Write-Host "  [WARN] $t" -ForegroundColor Yellow }
+function Close-ProgressLine {
+    $open = $script:_barOpen
+    if ($env:OS -eq 'Windows_NT') { try { $open = [Console]::CursorLeft -gt 0 } catch { } }
+    if ($open) { Write-Host '' }
+    $script:_barOpen = $false
+}
+function Write-Banner  { param([string]$t) Close-ProgressLine; Write-Host $t -ForegroundColor $PINK }
+function Write-Title   { param([string]$t) Close-ProgressLine; Write-Host ""; Write-Host "  $t" -ForegroundColor $PINK; Write-Host "" }
+function Write-Body    { param([string]$t) Close-ProgressLine; Write-Host "  $t" -ForegroundColor $WHITE }
+function Write-Success { param([string]$t) Close-ProgressLine; Write-Host "  [OK] $t" -ForegroundColor $GREEN }
+function Write-Err     { param([string]$t) Close-ProgressLine; Write-Host "  [ERROR] $t" -ForegroundColor $RED }
+function Write-Warn    { param([string]$t) Close-ProgressLine; Write-Host "  [WARN] $t" -ForegroundColor Yellow }
 
-$script:_barPct = 0
+$script:_barPct  = 0
+$script:_barOpen = $false
+
+function Write-ProgressLine {
+    param([int]$Pct, [string]$Activity)
+    $w = 80
+    try { $w = [Console]::WindowWidth } catch { }
+    if ($w -lt 40) { $w = 80 }
+    $max  = $w - 1
+    $barW = [Math]::Min(46, [Math]::Max(10, $max - 31))
+    $f    = [int](($Pct / 100) * $barW)
+    $line = '  [' + ('#' * $f) + ('-' * ($barW - $f)) + '] ' + ('{0,3}%' -f $Pct) + '  ' + $Activity
+    if ($line.Length -gt $max) { $line = $line.Substring(0, $max - 3) + '...' }
+    Write-Host ("`r" + $line.PadRight($max)) -NoNewline -ForegroundColor $GREEN
+    $script:_barOpen = $true
+}
 
 function Show-Progress {
     param([string]$Activity, [int]$Pct, [switch]$Done)
-    $width = 46
     if ($Done) {
-        for ($p = $script:_barPct; $p -le 100; $p += 2) {
-            $f   = [int](($p / 100) * $width)
-            $bar = '[' + ('#' * $f) + ('-' * ($width - $f)) + ']'
-            Write-Host ("`r  $bar {0,3}%  $Activity{1}" -f $p, (' ' * 30)) -NoNewline -ForegroundColor $GREEN
+        for ($p = $script:_barPct; $p -lt 100; $p += 2) {
+            Write-ProgressLine $p $Activity
             Start-Sleep -Milliseconds 6
         }
-        $bar = '[' + ('#' * $width) + ']'
-        Write-Host ("`r  $bar 100%  $Activity" + (' ' * 30)) -ForegroundColor $GREEN
+        Write-ProgressLine 100 $Activity
+        Close-ProgressLine
         $script:_barPct = 0
         return
     }
     $target = [Math]::Max(0, [Math]::Min(99, $Pct))
     for ($p = $script:_barPct; $p -le $target; $p += 1) {
-        $f   = [int](($p / 100) * $width)
-        $bar = '[' + ('#' * $f) + ('-' * ($width - $f)) + ']'
-        Write-Host ("`r  $bar {0,3}%  $Activity{1}" -f $p, (' ' * 30)) -NoNewline -ForegroundColor $GREEN
+        Write-ProgressLine $p $Activity
         Start-Sleep -Milliseconds 4
     }
     $script:_barPct = $target
@@ -73,6 +72,7 @@ function Show-Progress {
 function Read-Index {
     param([string]$Prompt, [int]$Count, [int]$Default = -1)
     while ($true) {
+        Close-ProgressLine
         $raw = "$(Read-Host $Prompt)".Trim()
         if ($raw -eq '' -and $Default -ge 0) { return $Default }
         $n = 0
@@ -81,8 +81,6 @@ function Read-Index {
     }
 }
 
-# Runs a console tool with stdin closed (so it can never block on a prompt)
-# and stdout/stderr drained asynchronously (so it can never deadlock).
 function Invoke-Quiet {
     param([string]$FilePath, [string]$Arguments)
     $psi = [System.Diagnostics.ProcessStartInfo]::new($FilePath, $Arguments)
@@ -99,7 +97,6 @@ function Invoke-Quiet {
     [pscustomobject]@{ ExitCode = $p.ExitCode; Output = $out.Result; Error = $err.Result }
 }
 
-# Locale-independent ownership + full control for BUILTIN\Administrators.
 function Grant-AdminFullControl {
     param([string]$Path)
     if (-not (Test-Path -LiteralPath $Path)) { return }
@@ -108,13 +105,6 @@ function Grant-AdminFullControl {
     Invoke-Quiet 'icacls.exe'  ("`"$Path`" /grant *S-1-5-32-544:(F) /T /C /Q") | Out-Null
 }
 
-# ===========================================================================
-#  OFFLINE REGISTRY HELPERS
-#  Values are written through the .NET registry API, not reg.exe: Windows
-#  PowerShell 5.1 silently drops empty-string arguments and does not escape
-#  embedded double quotes when calling native programs, which corrupted
-#  several values (classic context menu, Start pins JSON, RunOnce commands).
-# ===========================================================================
 $script:RegWarnings = [System.Collections.Generic.List[string]]::new()
 $script:LoadedHives = [System.Collections.Generic.List[string]]::new()
 $script:HiveFiles   = [ordered]@{
@@ -203,9 +193,6 @@ function Dismount-OfflineHives {
     if ($failed.Count -gt 0) { throw "Could not unload registry hive(s): $($failed -join ', ')" }
 }
 
-# ===========================================================================
-#  STATE + CLEANUP (runs on success, failure and Ctrl+C)
-# ===========================================================================
 $script:SelectedISO     = $null
 $script:IsoMountedByUs  = $false
 $script:WimMounted      = $false
@@ -242,9 +229,6 @@ function Invoke-Cleanup {
 $exitCode = 0
 try {
 
-# ===========================================================================
-#  INPUT FILES (plain text, validated before anything is touched)
-# ===========================================================================
 $scriptDir   = Split-Path -Parent $PSCommandPath
 $_xmlPath    = Join-Path $scriptDir 'unattend.xml'
 $_tweaksPath = Join-Path $scriptDir 'niix-tweaks.ps1'
@@ -265,9 +249,6 @@ if ($_perr -and $_perr.Count -gt 0) {
     throw "niix-tweaks.ps1 has a syntax error on line $($_perr[0].Extent.StartLineNumber): $($_perr[0].Message)"
 }
 
-# ===========================================================================
-#  BANNER
-# ===========================================================================
 Clear-Host
 Write-Banner ""
 Write-Banner "  +----------------------------------------------------------+"
@@ -284,7 +265,6 @@ Write-Banner "  |                                                          |"
 Write-Banner "  +----------------------------------------------------------+"
 Write-Banner ""
 
-# ---- Clean up leftovers from a previous run that crashed or was closed ----
 foreach ($name in $script:HiveFiles.Keys) {
     if (Test-HiveLoaded $name) { [void](Invoke-HiveUnload $name) }
 }
@@ -295,17 +275,14 @@ Invoke-Quiet 'dism.exe' '/English /Cleanup-Wim' | Out-Null
 Get-ChildItem -LiteralPath $env:TEMP -Directory -Filter 'niixdebloat_*' -ErrorAction SilentlyContinue |
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 
-# ---- Free space check (source export + work image + output ISO) ----
 $_tempRoot = [System.IO.Path]::GetPathRoot([System.IO.Path]::GetFullPath($env:TEMP))
 $_freeGB   = [math]::Round(([System.IO.DriveInfo]::new($_tempRoot)).AvailableFreeSpace / 1GB, 1)
 if ($_freeGB -lt 25) {
     Write-Warn "Only $_freeGB GB free on $_tempRoot -- at least 25 GB is recommended."
+    Close-ProgressLine
     if ("$(Read-Host '  Continue anyway? [y/N]')" -notmatch '^[Yy]') { throw "Aborted: not enough free disk space." }
 }
 
-# ===========================================================================
-#  STEP 0  --  DRIVER INJECTION PROMPT
-# ===========================================================================
 Write-Title "STEP 0 -- Driver options..."
 Write-Body "Add this PC's current drivers to the ISO? Useful if the target machine is"
 Write-Body "the same PC (or identical hardware) and you want networking/storage/GPU"
@@ -336,9 +313,6 @@ if ($injectDrivers) {
     }
 }
 
-# ===========================================================================
-#  STEP 1  --  LOCATE ISO
-# ===========================================================================
 Write-Title "STEP 1 -- Locating ISO file..."
 
 $isoFiles = @(Get-ChildItem -LiteralPath $scriptDir -Filter '*.iso' -File -ErrorAction SilentlyContinue |
@@ -349,7 +323,7 @@ if ($isoFiles.Count -eq 0) {
     Write-Body "No .iso found in script directory."
     Write-Host ""
     Write-Host "  Download a Windows 11 ISO from Microsoft:" -ForegroundColor $WHITE
-    Write-Host "  https://www.microsoft.com/software-download/windows11" -ForegroundColor Cyan
+    Write-Host "  https://www.microsoft.com/software-download/windows11" -ForegroundColor $WHITE
     Write-Host ""
     Write-Body "Place the ISO in the same folder as this script, or browse for it now."
     Write-Host ""
@@ -379,9 +353,6 @@ if ($isoFiles.Count -eq 0) {
 $isoGB = [math]::Round((Get-Item -LiteralPath $script:SelectedISO).Length / 1GB, 2)
 Write-Success "Selected: $(Split-Path $script:SelectedISO -Leaf)  ($isoGB GB)"
 
-# ===========================================================================
-#  STEP 2  --  MOUNT & VERIFY
-# ===========================================================================
 Write-Title "STEP 2 -- Mounting and verifying ISO..."
 Show-Progress "Mounting ISO..." 20
 
@@ -447,9 +418,6 @@ if ("$($editionDetail.Architecture)" -match '^(12|arm64)$') {
 }
 Write-Success "Edition: $selectedEdition  (Index $selectedIndex)"
 
-# ===========================================================================
-#  STEP 3  --  WORKSPACE
-# ===========================================================================
 Write-Title "STEP 3 -- Preparing workspace..."
 Show-Progress "Creating temp directories..." 10
 
@@ -463,11 +431,6 @@ $rc = Invoke-Quiet 'robocopy.exe' "$driveLetter `"$isoContents`" /E /R:2 /W:2 /A
 if ($rc.ExitCode -ge 8) { throw "robocopy failed (exit $($rc.ExitCode)): $($rc.Output.Trim())" }
 Show-Progress "ISO contents copied." 100 -Done
 
-# ===========================================================================
-#  STEP 4  --  EXPORT SELECTED EDITION + MOUNT
-#  Exporting first works for both install.wim and install.esd (ESD files
-#  cannot be mounted directly) and strips every other edition.
-# ===========================================================================
 Write-Title "STEP 4 -- Exporting and mounting $selectedEdition..."
 
 $workWim  = Join-Path $isoContents 'sources\install_work.wim'
@@ -489,9 +452,6 @@ $script:WimMounted = $true
 $mountDir = $script:MountDir
 Show-Progress "Image mounted." 100 -Done
 
-# ===========================================================================
-#  STEP 4b  --  INJECT DRIVERS (if requested in STEP 0)
-# ===========================================================================
 if ($script:DriverExportDir) {
     Write-Title "STEP 4b -- Injecting this PC's drivers into the image..."
     Show-Progress "Adding drivers to image (this can take a few minutes)..." 40
@@ -504,12 +464,8 @@ if ($script:DriverExportDir) {
     }
 }
 
-# ===========================================================================
-#  STEP 5  --  APPLY ALL MODIFICATIONS
-# ===========================================================================
 Write-Title "STEP 5 -- Applying debloat and privacy hardening..."
 
-# -- 5a. Remove provisioned AppX packages -------------------------------------
 Show-Progress "Removing AppX bloatware..." 5
 
 $pkgPrefixes = @(
@@ -556,7 +512,6 @@ foreach ($pkg in $allPkgs) {
 }
 Show-Progress "Removed $removed AppX packages." 10 -Done
 
-# -- 5a2. Remove Windows Backup capability (offline) ---------------------------
 Show-Progress "Removing Windows Backup capability..." 11
 $capList = Invoke-Quiet 'dism.exe' "/English `"/Image:$mountDir`" /Get-Capabilities"
 $allCaps = @($capList.Output -split "`r?`n" | ForEach-Object { if ($_ -match '^Capability Identity\s*:\s*(.+)$') { $Matches[1].Trim() } })
@@ -565,11 +520,7 @@ foreach ($cap in $allCaps) {
         Invoke-Quiet 'dism.exe' "/English `"/Image:$mountDir`" /Remove-Capability `"/CapabilityName:$cap`"" | Out-Null
     }
 }
-# Recall is neutralized by policy (DisableAIDataAnalysis + TurnOffSavingSnapshots
-# in step 5g). The Recall optional feature is NOT removed: on Windows 11 24H2,
-# removing it also breaks the modern File Explorer UI.
 
-# -- 5b. Remove OneDrive -------------------------------------------------------
 Show-Progress "Removing OneDrive..." 12
 foreach ($od in @("$mountDir\Windows\System32\OneDriveSetup.exe", "$mountDir\Windows\SysWOW64\OneDriveSetup.exe")) {
     if (Test-Path -LiteralPath $od) {
@@ -579,9 +530,6 @@ foreach ($od in @("$mountDir\Windows\System32\OneDriveSetup.exe", "$mountDir\Win
 }
 Show-Progress "OneDrive removed." 15 -Done
 
-# -- 5b2. Remove Microsoft Edge (browser) from the image -----------------------
-# EdgeWebView (WebView2 Runtime) and EdgeUpdate are intentionally kept.
-# Microsoft.Win32WebViewHost ("Desktop App Web Viewer") is also kept.
 Show-Progress "Removing Edge files from image..." 17
 $ep = @(
     "$mountDir\Program Files (x86)\Microsoft\Edge",
@@ -601,7 +549,6 @@ foreach ($e in $ep) {
 }
 Show-Progress "Edge files removed from image." 20 -Done
 
-# -- 5c. Load offline hives ----------------------------------------------------
 Show-Progress "Loading offline registry hives..." 22
 Mount-OfflineHives -ImageRoot $mountDir
 
@@ -618,7 +565,6 @@ if ($_sel) {
 $SY  = 'HKLM\NIIX_SYSTEM\ControlSet{0:D3}' -f $_cs
 $SYR = 'HKLM\NIIX_SYSTEM'
 
-# -- 5d. Hardware bypass -------------------------------------------------------
 Show-Progress "Hardware requirement bypass..." 25
 Set-OfflineReg "$DF\Control Panel\UnsupportedHardwareNotificationCache" 'SV1' 'REG_DWORD' '0'
 Set-OfflineReg "$DF\Control Panel\UnsupportedHardwareNotificationCache" 'SV2' 'REG_DWORD' '0'
@@ -629,10 +575,6 @@ foreach ($n in @('BypassCPUCheck','BypassRAMCheck','BypassSecureBootCheck','Bypa
 }
 Set-OfflineReg "$SYR\Setup\MoSetup" 'AllowUpgradesWithUnsupportedTPMOrCPU' 'REG_DWORD' '1'
 
-# -- 5d2. Disable Core Isolation / Memory Integrity (VBS/HVCI) ----------------
-# Deliberate gaming-performance trade-off. Written both as runtime state and
-# as policy so the device is never in a "not yet configured" state that an
-# automatic enablement could pick up.
 Set-OfflineReg "$SY\Control\DeviceGuard"                                            'EnableVirtualizationBasedSecurity' 'REG_DWORD' '0'
 Set-OfflineReg "$SY\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity"  'Enabled'                           'REG_DWORD' '0'
 Set-OfflineReg "$SY\Control\DeviceGuard\Scenarios\CredentialGuard"                  'Enabled'                           'REG_DWORD' '0'
@@ -642,7 +584,6 @@ Set-OfflineReg "$SW\Policies\Microsoft\Windows\DeviceGuard" 'HypervisorEnforcedC
 Set-OfflineReg "$SW\Policies\Microsoft\Windows\DeviceGuard" 'RequirePlatformSecurityFeatures'   'REG_DWORD' '1'
 Set-OfflineReg "$SW\Policies\Microsoft\Windows\DeviceGuard" 'LsaCfgFlags'                       'REG_DWORD' '0'
 
-# -- 5e. Content delivery / sponsored apps ------------------------------------
 Show-Progress "Disabling sponsored apps and content delivery..." 30
 $cdm = "$NU\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"
 foreach ($k in @('OemPreInstalledAppsEnabled','PreInstalledAppsEnabled',
@@ -661,7 +602,6 @@ Set-OfflineReg "$SW\Policies\Microsoft\PushToInstall" 'DisablePushToInstall' 'RE
 Remove-OfflineReg "$cdm\Subscriptions"
 Remove-OfflineReg "$cdm\SuggestedApps"
 
-# -- 5f. Telemetry & privacy ---------------------------------------------------
 Show-Progress "Disabling telemetry and data collection..." 38
 Set-OfflineReg "$NU\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo"          'Enabled'                                      'REG_DWORD' '0'
 Set-OfflineReg "$NU\Software\Microsoft\Windows\CurrentVersion\Privacy"                  'TailoredExperiencesWithDiagnosticDataEnabled' 'REG_DWORD' '0'
@@ -679,11 +619,8 @@ Set-OfflineReg "$SW\Policies\Microsoft\Windows\AdvertisingInfo"                 
 Set-OfflineReg "$SW\Policies\Microsoft\Windows\System"                                  'EnableActivityFeed'                           'REG_DWORD' '0'
 Set-OfflineReg "$SW\Policies\Microsoft\Windows\System"                                  'PublishUserActivities'                        'REG_DWORD' '0'
 Set-OfflineReg "$SW\Policies\Microsoft\Windows\System"                                  'UploadUserActivities'                         'REG_DWORD' '0'
-# Location, camera, microphone etc. stay user-controlled in Settings. Only
-# apps' access to system DIAGNOSTIC INFO is denied (a telemetry vector).
 Set-OfflineReg "$SW\Policies\Microsoft\Windows\AppPrivacy" 'LetAppsGetDiagnosticInfo' 'REG_DWORD' '2'
 
-# -- 5g. Copilot / AI / Bing / Recall -----------------------------------------
 Show-Progress "Disabling Copilot, Recall, Bing and AI features..." 45
 Set-OfflineReg "$SW\Policies\Microsoft\Windows\WindowsCopilot"  'TurnOffWindowsCopilot'       'REG_DWORD' '1'
 Set-OfflineReg "$NU\Software\Policies\Microsoft\Windows\WindowsCopilot" 'TurnOffWindowsCopilot' 'REG_DWORD' '1'
@@ -693,7 +630,6 @@ Set-OfflineReg "$NU\Software\Policies\Microsoft\Windows\Explorer" 'DisableSearch
 Set-OfflineReg "$SW\Policies\Microsoft\Windows\WindowsAI"       'DisableAIDataAnalysis'       'REG_DWORD' '1'
 Set-OfflineReg "$SW\Policies\Microsoft\Windows\WindowsAI"       'TurnOffSavingSnapshots'      'REG_DWORD' '1'
 
-# -- 5h. UI / Taskbar ---------------------------------------------------------
 Show-Progress "Applying UI and Taskbar tweaks..." 52
 $adv = "$NU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
 Set-OfflineReg "$SW\Policies\Microsoft\Windows\Windows Chat" 'ChatIcon' 'REG_DWORD' '3'
@@ -714,7 +650,6 @@ Set-OfflineReg "$SW\Policies\Microsoft\Windows\Explorer" 'HideRecommendedSection
 Set-OfflineReg "$NU\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32" '' 'REG_SZ' ''
 Set-OfflineReg "$SW\Policies\Microsoft\Dsh" 'AllowNewsAndInterests' 'REG_DWORD' '0'
 
-# Dark theme baked into the Default user hive (avoids SetColorTheme race)
 $pers = "$NU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
 Set-OfflineReg $pers 'SystemUsesLightTheme' 'REG_DWORD' '0'
 Set-OfflineReg $pers 'AppsUseLightTheme'    'REG_DWORD' '0'
@@ -722,7 +657,6 @@ Set-OfflineReg $pers 'EnableTransparency'   'REG_DWORD' '1'
 Set-OfflineReg $pers 'ColorPrevalence'      'REG_DWORD' '0'
 Set-OfflineReg "$NU\Software\Microsoft\Windows\DWM" 'ColorPrevalence' 'REG_DWORD' '0'
 
-# -- 5i. OneDrive sync policies ------------------------------------------------
 Show-Progress "Disabling OneDrive sync policies..." 55
 Set-OfflineReg "$SW\Policies\Microsoft\Windows\OneDrive" 'DisableFileSyncNGSC'                   'REG_DWORD' '1'
 Set-OfflineReg "$SW\Policies\Microsoft\Windows\OneDrive" 'DisableLibrariesDefaultSaveToOneDrive' 'REG_DWORD' '1'
@@ -731,19 +665,12 @@ if ($_runKey) {
     try { $_runKey.DeleteValue('OneDriveSetup', $false) } catch { } finally { $_runKey.Close() }
 }
 
-# -- 5j. Suppress Windows Update during OOBE ----------------------------------
-# Only wuauserv is disabled offline: its key is writable by Administrators,
-# so FirstLogon.ps1 and niix-tweaks.ps1 can both reliably restore it.
-# (WaaSMedicSvc/UsoSvc are ACL-protected and are deliberately left alone --
-# disabling them can make Windows Update impossible to restore.)
-# No NoAutoUpdate/AUOptions/UseWUServer policy is written here.
 Show-Progress "Suppressing Windows Update during OOBE..." 58
 Set-OfflineReg "$SW\Microsoft\Windows\CurrentVersion\WindowsUpdate\Orchestrator\UScheduler_Oobe\WindowsUpdate" 'workCompleted' 'REG_DWORD' '1'
 Remove-OfflineReg "$SW\Microsoft\WindowsUpdate\Orchestrator\UScheduler_Oobe\WindowsUpdate"
 Set-OfflineReg "$SW\Policies\Microsoft\Windows\DeliveryOptimization" 'DODownloadMode' 'REG_DWORD' '0'
 Set-OfflineReg "$SY\Services\wuauserv" 'Start' 'REG_DWORD' '4'
 
-# -- 5k. Block Teams / Outlook / DevHome auto-install -------------------------
 Show-Progress "Blocking Teams, Outlook, DevHome auto-install..." 61
 Set-OfflineReg "$SW\Policies\Microsoft\Teams"                'DisableInstallation' 'REG_DWORD' '1'
 Set-OfflineReg "$SW\Policies\Microsoft\Windows\Windows Mail" 'PreventRun'          'REG_DWORD' '1'
@@ -753,20 +680,15 @@ foreach ($k in @('OutlookUpdate','DevHomeUpdate')) {
     Remove-OfflineReg "$SW\Microsoft\WindowsUpdate\Orchestrator\UScheduler_Oobe\$k"
 }
 
-# -- 5l. BitLocker / reserved storage -----------------------------------------
 Show-Progress "Disabling BitLocker auto-encryption and reserved storage..." 64
 Set-OfflineReg "$SY\Control\BitLocker" 'PreventDeviceEncryption' 'REG_DWORD' '1'
 Set-OfflineReg "$SW\Microsoft\Windows\CurrentVersion\ReserveManager" 'ShippedWithReserves' 'REG_DWORD' '0'
 
-# -- 5m. Local account OOBE bypass --------------------------------------------
 Show-Progress "Enabling local account OOBE bypass..." 66
 Set-OfflineReg "$SW\Microsoft\Windows\CurrentVersion\OOBE" 'BypassNRO' 'REG_DWORD' '1'
 Set-OfflineReg "$SW\Policies\Microsoft\Windows\System" 'NoLocalPasswordResetQuestions' 'REG_DWORD' '1'
 Set-OfflineReg "$SW\Microsoft\Windows NT\CurrentVersion\PasswordRecovery" 'Enabled' 'REG_DWORD' '0'
 
-# -- 5n. Privacy-invasive services --------------------------------------------
-# DPS, SysMain, PcaSvc, lfsvc, PhoneSvc, MapsBroker, TrkWks are deliberately
-# NOT disabled so apps and built-in diagnostics keep working.
 Show-Progress "Disabling privacy-invasive services..." 70
 foreach ($s in @('DiagTrack','dmwappushservice','RemoteRegistry','WerSvc','SDRSVC','wbengine')) {
     if (Test-OfflineKey "$SY\Services\$s") {
@@ -775,7 +697,6 @@ foreach ($s in @('DiagTrack','dmwappushservice','RemoteRegistry','WerSvc','SDRSV
 }
 Set-OfflineReg "$SW\Policies\Microsoft\Windows\Windows Error Reporting" 'Disabled' 'REG_DWORD' '1'
 
-# -- 5o. GameBar / Xbox / Edge services ----------------------------------------
 Show-Progress "Disabling GameBar, Xbox and Edge browser services..." 74
 Set-OfflineReg "$SW\Policies\Microsoft\Windows\GameDVR"                         'AllowGameDVR'              'REG_DWORD' '0'
 Set-OfflineReg "$NU\System\GameConfigStore"                                     'GameDVR_Enabled'           'REG_DWORD' '0'
@@ -783,7 +704,6 @@ Set-OfflineReg "$NU\System\GameConfigStore"                                     
 Set-OfflineReg "$NU\Software\Microsoft\Windows\CurrentVersion\GameDVR"          'AppCaptureEnabled'         'REG_DWORD' '0'
 Set-OfflineReg "$NU\Software\Microsoft\GameBar"                                 'UseNexusForGameBarEnabled' 'REG_DWORD' '0'
 Set-OfflineReg "$NU\Software\Microsoft\GameBar"                                 'AllowAutoGameMode'         'REG_DWORD' '0'
-# edgeupdate / edgeupdatem are NOT disabled: WebView2 Runtime needs them.
 foreach ($s in @('XblAuthManager','XblGameSave','XboxGipSvc','XboxNetApiSvc','MicrosoftEdgeElevationService')) {
     if (Test-OfflineKey "$SY\Services\$s") {
         Set-OfflineReg "$SY\Services\$s" 'Start' 'REG_DWORD' '4'
@@ -792,7 +712,6 @@ foreach ($s in @('XblAuthManager','XblGameSave','XboxGipSvc','XboxNetApiSvc','Mi
 [GC]::Collect()
 [GC]::WaitForPendingFinalizers()
 
-# -- 5o2. Gaming / system performance tweaks -----------------------------------
 Show-Progress "Applying gaming/performance tweaks (Game Mode, GPU scheduling)..." 75
 Set-OfflineReg "$NU\Software\Microsoft\GameBar" 'AutoGameModeEnabled'      'REG_DWORD' '1'
 Set-OfflineReg "$NU\Software\Microsoft\GameBar" 'ShowStartupPanel'         'REG_DWORD' '0'
@@ -805,9 +724,6 @@ Set-OfflineReg "$NU\System\GameConfigStore" 'GameDVR_HonorUserFSEBehaviorMode'  
 Set-OfflineReg "$NU\System\GameConfigStore" 'GameDVR_DXGIHonorFSEWindowsCompatible' 'REG_DWORD' '1'
 Set-OfflineReg "$SY\Control\GraphicsDrivers" 'HwSchMode' 'REG_DWORD' '2'
 
-# -- 5o3. Edge browser block (WebView2 explicitly allowed) --------------------
-# {56EB18F8-B008-4CBD-B6D2-8C97FE7E9062} = Edge Stable browser
-# {F3017226-FE2A-4295-8BDF-00C3A9A7E4C5} = WebView2 Runtime
 $eu = "$SW\Policies\Microsoft\EdgeUpdate"
 Set-OfflineReg "$SW\Microsoft\EdgeUpdate" 'DoNotUpdateToEdgeWithChromium' 'REG_DWORD' '1'
 Set-OfflineReg $eu 'UpdateDefault'                                  'REG_DWORD' '0'
@@ -826,17 +742,10 @@ Remove-OfflineReg "$SW\Microsoft\WindowsUpdate\Orchestrator\UScheduler_Oobe\Edge
 
 Set-OfflineReg "$SW\Policies\Microsoft\Windows\BackupAndRestore" 'DisableBackup' 'REG_DWORD' '1'
 
-# -- 5p. SmartScreen -----------------------------------------------------------
-# Deliberate trade-off of this build (see README "Notes & caveats").
 Show-Progress "Configuring SmartScreen..." 78
 Set-OfflineReg "$SW\Policies\Microsoft\Windows\System"               'EnableSmartScreen' 'REG_DWORD' '0'
 Set-OfflineReg "$SW\Policies\Microsoft\MicrosoftEdge\PhishingFilter" 'EnabledV9'         'REG_DWORD' '0'
 
-# -- 5q. niix-tweaks.ps1 into the image + Desktop-copy RunOnce ---------------
-# niix-tweaks.ps1 auto-runs once at first logon via the NiixTweaksAutoRun
-# scheduled task (registered elevated in Specialize.ps1). UserOnce.ps1
-# deletes *.lnk from the desktop, so a plain copy of the .ps1 is placed on
-# each new user's Desktop via RunOnce instead, for manual re-runs.
 Show-Progress "Writing niix-tweaks.ps1 into image..." 82
 $setupScriptsDir = Join-Path $mountDir 'Windows\Setup\Scripts'
 New-Item -ItemType Directory -Path $setupScriptsDir -Force | Out-Null
@@ -846,11 +755,6 @@ $runOnce = "$NU\Software\Microsoft\Windows\CurrentVersion\RunOnce"
 Set-OfflineReg $runOnce 'NiixTweaksDesktop' 'REG_SZ' ('powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -NoProfile -Command "' +
     "Copy-Item -LiteralPath 'C:\Windows\Setup\Scripts\niix-tweaks.ps1' -Destination ([Environment]::GetFolderPath('Desktop')) -Force" + '"')
 
-# -- 5q2. Bundled .exe files (optional) -> Public Desktop ----------------------
-# Every .exe placed next to this script (e.g. a browser installer, since Edge
-# is removed) is copied to C:\Users\Public\Desktop in the image, so it shows
-# on every user's desktop from the first boot. Files keep their Mark-of-the-Web
-# (if any), so Windows still shows its "run this file?" prompt for downloads.
 $bundledExes = @(Get-ChildItem -LiteralPath $scriptDir -Filter '*.exe' -File -ErrorAction SilentlyContinue |
                  Where-Object { $_.Extension -eq '.exe' } |
                  Sort-Object Name)
@@ -876,8 +780,6 @@ if ($bundledExes.Count -gt 0) {
     Write-Body "No .exe files next to the script -- nothing added to the desktop."
 }
 
-# -- 5r. Wallpaper (optional -- only if you supply one) ------------------------
-# Sets the DEFAULT wallpaper for new profiles; users can still change it.
 $customWall = @('wallpaper.jpg','wallpaper.jpeg','wallpaper.png') |
     ForEach-Object { Join-Path $scriptDir $_ } |
     Where-Object { Test-Path -LiteralPath $_ } |
@@ -898,8 +800,6 @@ if ($customWall) {
     Set-OfflineReg $desk 'WallpaperOriginX' 'REG_SZ' '0'
     Set-OfflineReg $desk 'WallpaperOriginY' 'REG_SZ' '0'
 
-    # ApplyWallpaper.ps1 is invoked by UserOnce.ps1 (interactive user context)
-    # and by a RunOnce entry for any profile created later.
     $applyWallLines = @(
         "`$wp = '$_wp'",
         "if (-not (Test-Path -LiteralPath `$wp)) { return }",
@@ -928,7 +828,6 @@ if ($customWall) {
     Write-Body "No wallpaper.jpg/.jpeg/.png next to the script -- Windows default wallpaper will be used."
 }
 
-# -- 5s. Unload hives ----------------------------------------------------------
 Show-Progress "Unloading offline registry hives..." 90
 Dismount-OfflineHives
 Show-Progress "All registry tweaks applied." 92 -Done
@@ -937,15 +836,11 @@ if ($script:RegWarnings.Count -gt 0) {
     foreach ($w in $script:RegWarnings) { Write-Host "     - $w" -ForegroundColor Yellow }
 }
 
-# -- 5t. autounattend.xml (copied byte-for-byte) -------------------------------
 Show-Progress "Writing autounattend.xml..." 95
 Copy-Item -LiteralPath $_xmlPath -Destination (Join-Path $isoContents 'autounattend.xml') -Force
 Remove-Item -LiteralPath (Join-Path $isoContents 'support') -Recurse -Force -ErrorAction SilentlyContinue
 Show-Progress "All modifications complete." 100 -Done
 
-# ===========================================================================
-#  STEP 6  --  DISM CLEANUP
-# ===========================================================================
 Write-Title "STEP 6 -- DISM component cleanup (this takes several minutes)..."
 Show-Progress "Running DISM /StartComponentCleanup /ResetBase..." 30
 $r = Invoke-Quiet 'dism.exe' "/English `"/Image:$mountDir`" /Cleanup-Image /StartComponentCleanup /ResetBase"
@@ -956,19 +851,12 @@ if ($r.ExitCode -eq 0) {
     Write-Warn "DISM cleanup returned $($r.ExitCode) -- continuing (image is still valid, just larger)."
 }
 
-# ===========================================================================
-#  STEP 7  --  SAVE IMAGE
-# ===========================================================================
 Write-Title "STEP 7 -- Saving modified image (takes several minutes)..."
 Show-Progress "Dismounting and saving..." 30
 Dismount-WindowsImage -Path $mountDir -Save -ErrorAction Stop | Out-Null
 $script:WimMounted = $false
 Show-Progress "Image saved." 100 -Done
 
-# ===========================================================================
-#  STEP 8  --  COMPACT INTO FINAL install.wim
-#  Re-exporting drops the space of every file deleted above.
-# ===========================================================================
 Write-Title "STEP 8 -- Building final install.wim..."
 Show-Progress "Exporting compacted image..." 40
 Export-WindowsImage -SourceImagePath $workWim -SourceIndex 1 `
@@ -976,9 +864,6 @@ Export-WindowsImage -SourceImagePath $workWim -SourceIndex 1 `
 Remove-Item -LiteralPath $workWim -Force
 Show-Progress "Single-edition install.wim ready." 100 -Done
 
-# ===========================================================================
-#  STEP 9  --  LOCATE OSCDIMG
-# ===========================================================================
 Write-Title "STEP 9 -- Locating oscdimg.exe..."
 
 function Find-Oscdimg {
@@ -1024,9 +909,6 @@ if (-not $oscdimg) {
 Show-Progress "oscdimg.exe found." 100 -Done
 Write-Body $oscdimg
 
-# ===========================================================================
-#  STEP 10  --  BUILD ISO
-# ===========================================================================
 Write-Title "STEP 10 -- Building output ISO..."
 
 $outputDir = Split-Path $script:SelectedISO -Parent
@@ -1061,9 +943,6 @@ if ($proc.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $outputISO)) {
 Write-Host ""
 Show-Progress "ISO built successfully." 100 -Done
 
-# ===========================================================================
-#  SUMMARY
-# ===========================================================================
 $outGB   = [math]::Round((Get-Item -LiteralPath $outputISO).Length / 1GB, 2)
 $outName = Split-Path $outputISO -Leaf
 
@@ -1096,6 +975,7 @@ $items = @(
     "autounattend.xml added to the ISO root",
     "niix-tweaks.ps1 auto-runs once at first logon (elevated, no UAC prompt)",
     "  and a copy is placed on the Desktop for manual re-runs",
+    "  then re-applies silently at every login (undoes Windows update changes)",
     "Logs saved to Documents\NiixDebloat-Logs after first logon"
 )
 if ($script:DriverExportDir) { $items += "This PC's drivers exported and injected into the image" }
@@ -1113,5 +993,6 @@ Write-Host ""
     Invoke-Cleanup
 }
 
+Close-ProgressLine
 Read-Host "  Press Enter to exit" | Out-Null
 exit $exitCode
