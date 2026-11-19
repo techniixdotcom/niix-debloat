@@ -14,6 +14,8 @@ if (-not $_isAdmin -or $PSVersionTable.PSEdition -eq 'Core') {
     exit
 }
 
+$runComponentCleanup = $false
+
 $PINK  = 'Magenta'
 $GREEN = 'Green'
 $WHITE = 'White'
@@ -181,6 +183,70 @@ public static class NiixRegForce {
     return [NiixRegForce]::Open($SubPath)
 }
 
+function Invoke-RegExeRenamed {
+    param([string]$Arguments)
+    $src = Join-Path $env:SystemRoot 'System32\reg.exe'
+    $dst = Join-Path $env:TEMP ("niix-reg-{0}.exe" -f [guid]::NewGuid().ToString('N').Substring(0, 8))
+    Copy-Item -LiteralPath $src -Destination $dst -Force -ErrorAction Stop
+    try { return Invoke-Quiet $dst $Arguments }
+    finally { Remove-Item -LiteralPath $dst -Force -ErrorAction SilentlyContinue }
+}
+
+$script:LocalPolicy = [System.Collections.Generic.List[object]]::new()
+
+function Add-LocalPolicyDword {
+    param([string]$Key, [string]$Name, [uint32]$Value)
+    $script:LocalPolicy.Add([pscustomobject]@{ Key = $Key; Name = $Name; Value = $Value })
+}
+
+function Write-LocalPolicyFiles {
+    param([string]$MountDir)
+    if ($script:LocalPolicy.Count -eq 0) { return }
+    $gpDir   = Join-Path $MountDir 'Windows\System32\GroupPolicy'
+    $machDir = Join-Path $gpDir 'Machine'
+    New-Item -ItemType Directory -Path $machDir -Force | Out-Null
+    $polPath = Join-Path $machDir 'Registry.pol'
+
+    $ms  = [System.IO.MemoryStream]::new()
+    $bw  = [System.IO.BinaryWriter]::new($ms)
+    $u16 = [System.Text.Encoding]::Unicode
+    if (Test-Path -LiteralPath $polPath) {
+        $old = [System.IO.File]::ReadAllBytes($polPath)
+        if ($old.Length -ge 8) { $bw.Write($old) } else { $bw.Write([uint32]0x67655250); $bw.Write([uint32]1) }
+    } else {
+        $bw.Write([uint32]0x67655250)
+        $bw.Write([uint32]1)
+    }
+    foreach ($e in $script:LocalPolicy) {
+        $bw.Write($u16.GetBytes('['))
+        $bw.Write($u16.GetBytes($e.Key + [char]0))
+        $bw.Write($u16.GetBytes(';'))
+        $bw.Write($u16.GetBytes($e.Name + [char]0))
+        $bw.Write($u16.GetBytes(';'))
+        $bw.Write([uint32]4)
+        $bw.Write($u16.GetBytes(';'))
+        $bw.Write([uint32]4)
+        $bw.Write($u16.GetBytes(';'))
+        $bw.Write([uint32]$e.Value)
+        $bw.Write($u16.GetBytes(']'))
+    }
+    $bw.Flush()
+    [System.IO.File]::WriteAllBytes($polPath, $ms.ToArray())
+    $bw.Dispose()
+
+    $gptPath  = Join-Path $gpDir 'gpt.ini'
+    $extNames = '[{35378EAC-683F-11D2-A89A-00C04FBBCFA2}{D02B1F72-3407-48AE-BA88-E8213C6761F1}]'
+    $version  = 1
+    $lines    = @()
+    if (Test-Path -LiteralPath $gptPath) {
+        $lines = @(Get-Content -LiteralPath $gptPath -ErrorAction SilentlyContinue)
+        foreach ($l in $lines) { if ($l -match '^\s*Version\s*=\s*(\d+)') { $version = [int64]$Matches[1] + 1 } }
+        $lines = @($lines | Where-Object { $_ -notmatch '^\s*Version\s*=' -and $_ -notmatch '^\s*gPCMachineExtensionNames\s*=' -and $_ -notmatch '^\s*\[General\]' })
+    }
+    $out = @('[General]', "gPCMachineExtensionNames=$extNames", "Version=$version") + $lines
+    [System.IO.File]::WriteAllText($gptPath, (($out -join "`r`n") + "`r`n"), [System.Text.Encoding]::ASCII)
+}
+
 function Set-OfflineReg {
     param([string]$p, [string]$n, [string]$t, [string]$v)
     $key = $null
@@ -191,11 +257,21 @@ function Set-OfflineReg {
     } catch {
         $firstError = $_.Exception.Message
         if ($key) { $key.Close(); $key = $null }
+        $forcedError = $null
         try {
             $key = Open-OfflineKeyForced (Get-RegSubPath $p)
             Write-OfflineRegValue $key $n $t $v
         } catch {
-            $script:RegWarnings.Add("$p\$n : $firstError (forced write also failed: $($_.Exception.Message))")
+            $forcedError = $_.Exception.Message
+        }
+        if ($forcedError) {
+            try {
+                $vEsc = $v -replace '"', '\"'
+                $r = Invoke-RegExeRenamed ("add `"$p`" /v `"$n`" /t $t /d `"$vEsc`" /f")
+                if ($r.ExitCode -ne 0) { throw ("$($r.Error)$($r.Output)").Trim() }
+            } catch {
+                $script:RegWarnings.Add("$p\$n : $firstError (forced write: $forcedError; renamed reg.exe: $($_.Exception.Message))")
+            }
         }
     } finally {
         if ($key) { $key.Close() }
@@ -261,6 +337,7 @@ $script:IsoMountedByUs  = $false
 $script:WimMounted      = $false
 $script:MountDir        = $null
 $script:WorkDir         = $null
+$script:DefenderExcluded = $false
 $script:DriverExportDir = $null
 
 function Invoke-Cleanup {
@@ -283,6 +360,10 @@ function Invoke-Cleanup {
     }
     if ($script:WorkDir -and (Test-Path -LiteralPath $script:WorkDir)) {
         Remove-Item -LiteralPath $script:WorkDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    if ($script:DefenderExcluded) {
+        Remove-MpPreference -ExclusionPath $script:WorkDir -ErrorAction SilentlyContinue
+        $script:DefenderExcluded = $false
     }
     if ($script:DriverExportDir -and (Test-Path -LiteralPath $script:DriverExportDir)) {
         Remove-Item -LiteralPath $script:DriverExportDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -481,6 +562,25 @@ if ("$($editionDetail.Architecture)" -match '^(12|arm64)$') {
 }
 Write-Success "Edition: $selectedEdition  (Index $selectedIndex)"
 
+$isoLang = $null
+try {
+    $langs = @($editionDetail.Languages)
+    if ($langs.Count -gt 0) {
+        $li = 0
+        if ($null -ne $editionDetail.DefaultLanguageIndex) { $li = [Math]::Max(0, [Math]::Min([int]$editionDetail.DefaultLanguageIndex, $langs.Count - 1)) }
+        if ("$($langs[$li])" -match '([A-Za-z]{2,3}-[A-Za-z0-9]{2,8}(-[A-Za-z0-9]{2,8})?)') { $isoLang = $Matches[1] }
+    }
+} catch { }
+if (-not $isoLang) {
+    $wi = Invoke-Quiet 'dism.exe' "/English /Get-WimInfo `"/WimFile:$sourceImage`" /Index:$selectedIndex"
+    if ($wi.Output -match '(?m)^\s*([A-Za-z]{2,3}-[A-Za-z0-9]{2,8}(-[A-Za-z0-9]{2,8})?)\s*\(Default\)') { $isoLang = $Matches[1] }
+}
+if ($isoLang) {
+    Write-Success "Language: $isoLang"
+} else {
+    Write-Warn "Could not detect the image language -- output will be named without it."
+}
+
 Write-Title "STEP 3 -- Preparing workspace..."
 Show-Progress "Creating temp directories..." 10
 
@@ -488,6 +588,11 @@ $script:WorkDir  = Join-Path $env:TEMP ("niixdebloat_{0:yyyyMMdd_HHmmss}" -f (Ge
 $isoContents     = Join-Path $script:WorkDir 'iso_contents'
 $script:MountDir = Join-Path $script:WorkDir 'wim_mount'
 New-Item -ItemType Directory -Path $isoContents, $script:MountDir -Force | Out-Null
+
+try {
+    Add-MpPreference -ExclusionPath $script:WorkDir -ErrorAction Stop
+    $script:DefenderExcluded = $true
+} catch { }
 
 Show-Progress "Copying ISO contents (may take a few minutes)..." 30
 $rc = Invoke-Quiet 'robocopy.exe' "$driveLetter `"$isoContents`" /E /R:2 /W:2 /A-:R /XF install.wim install.esd /NFL /NDL /NJH /NJS /NP"
@@ -501,7 +606,7 @@ $finalWim = Join-Path $isoContents 'sources\install.wim'
 
 Show-Progress "Exporting edition (several minutes, longer for .esd sources)..." 30
 Export-WindowsImage -SourceImagePath $sourceImage -SourceIndex $selectedIndex `
-                    -DestinationImagePath $workWim -CompressionType max -ErrorAction Stop | Out-Null
+                    -DestinationImagePath $workWim -CompressionType fast -ErrorAction Stop | Out-Null
 Show-Progress "Edition exported." 100 -Done
 
 if ($script:IsoMountedByUs) {
@@ -697,7 +802,6 @@ Show-Progress "Applying UI and Taskbar tweaks..." 52
 $adv = "$NU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
 Set-OfflineReg "$SW\Policies\Microsoft\Windows\Windows Chat" 'ChatIcon' 'REG_DWORD' '3'
 Set-OfflineReg $adv 'TaskbarMn'                'REG_DWORD' '0'
-Set-OfflineReg $adv 'TaskbarDa'                'REG_DWORD' '0'
 Set-OfflineReg $adv 'ShowTaskViewButton'       'REG_DWORD' '0'
 Set-OfflineReg $adv 'HideFileExt'              'REG_DWORD' '0'
 Set-OfflineReg $adv 'Hidden'                   'REG_DWORD' '1'
@@ -711,7 +815,7 @@ Set-OfflineReg "$NU\Software\Microsoft\Windows\CurrentVersion\Search" 'BingSearc
 Set-OfflineReg "$NU\Software\Microsoft\Windows\CurrentVersion\Search" 'CortanaConsent'       'REG_DWORD' '0'
 Set-OfflineReg "$SW\Policies\Microsoft\Windows\Explorer" 'HideRecommendedSection' 'REG_DWORD' '1'
 Set-OfflineReg "$NU\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32" '' 'REG_SZ' ''
-Set-OfflineReg "$SW\Policies\Microsoft\Dsh" 'AllowNewsAndInterests' 'REG_DWORD' '0'
+Add-LocalPolicyDword 'Software\Policies\Microsoft\Dsh' 'AllowNewsAndInterests' 0
 
 $pers = "$NU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
 Set-OfflineReg $pers 'SystemUsesLightTheme' 'REG_DWORD' '0'
@@ -893,6 +997,7 @@ if ($customWall) {
 
 Show-Progress "Unloading offline registry hives..." 90
 Dismount-OfflineHives
+Write-LocalPolicyFiles $mountDir
 Show-Progress "All registry tweaks applied." 92 -Done
 if ($script:RegWarnings.Count -gt 0) {
     Write-Warn "$($script:RegWarnings.Count) registry value(s) could not be written:"
@@ -904,14 +1009,15 @@ Copy-Item -LiteralPath $_xmlPath -Destination (Join-Path $isoContents 'autounatt
 Remove-Item -LiteralPath (Join-Path $isoContents 'support') -Recurse -Force -ErrorAction SilentlyContinue
 Show-Progress "All modifications complete." 100 -Done
 
-Write-Title "STEP 6 -- DISM component cleanup (this takes several minutes)..."
-Show-Progress "Running DISM /StartComponentCleanup /ResetBase..." 30
-$r = Invoke-Quiet 'dism.exe' "/English `"/Image:$mountDir`" /Cleanup-Image /StartComponentCleanup /ResetBase"
-if ($r.ExitCode -eq 0) {
-    Show-Progress "DISM cleanup complete." 100 -Done
-} else {
-    Write-Host ""
-    Write-Warn "DISM cleanup returned $($r.ExitCode) -- continuing (image is still valid, just larger)."
+if ($runComponentCleanup) {
+    Write-Title "STEP 6 -- DISM component cleanup (this takes several minutes)..."
+    Show-Progress "Running DISM /StartComponentCleanup /ResetBase..." 30
+    $r = Invoke-Quiet 'dism.exe' "/English `"/Image:$mountDir`" /Cleanup-Image /StartComponentCleanup /ResetBase"
+    if ($r.ExitCode -eq 0) {
+        Show-Progress "DISM cleanup complete." 100 -Done
+    } else {
+        Write-Warn "DISM cleanup returned $($r.ExitCode) -- continuing (image is still valid, just larger)."
+    }
 }
 
 Write-Title "STEP 7 -- Saving modified image (takes several minutes)..."
@@ -982,12 +1088,13 @@ try {
 } catch {
     $outputDir = $scriptDir
 }
-$outputISO = Join-Path $outputDir 'win11_niix.iso'
+$outBase   = if ($isoLang) { "win11_niix_$isoLang" } else { 'win11_niix' }
+$outputISO = Join-Path $outputDir "$outBase.iso"
 if (Test-Path -LiteralPath $outputISO) {
     try {
         Remove-Item -LiteralPath $outputISO -Force -ErrorAction Stop
     } catch {
-        $outputISO = Join-Path $outputDir ("win11_niix_{0:yyyyMMdd_HHmmss}.iso" -f (Get-Date))
+        $outputISO = Join-Path $outputDir ("{0}_{1:yyyyMMdd_HHmmss}.iso" -f $outBase, (Get-Date))
     }
 }
 
