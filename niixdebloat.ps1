@@ -120,20 +120,83 @@ function Get-RegSubPath {
     return $Matches[1]
 }
 
+function Write-OfflineRegValue {
+    param($key, [string]$n, [string]$t, [string]$v)
+    switch ($t) {
+        'REG_DWORD'     { $key.SetValue($n, [BitConverter]::ToInt32([BitConverter]::GetBytes([uint32]$v), 0), [Microsoft.Win32.RegistryValueKind]::DWord) }
+        'REG_SZ'        { $key.SetValue($n, $v, [Microsoft.Win32.RegistryValueKind]::String) }
+        'REG_EXPAND_SZ' { $key.SetValue($n, $v, [Microsoft.Win32.RegistryValueKind]::ExpandString) }
+        default         { throw "Unsupported value type: $t" }
+    }
+}
+
+function Open-OfflineKeyForced {
+    param([string]$SubPath)
+    if (-not ('NiixRegForce' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using Microsoft.Win32;
+using Microsoft.Win32.SafeHandles;
+public static class NiixRegForce {
+    [StructLayout(LayoutKind.Sequential, Pack = 1)]
+    struct TokPriv1Luid { public int Count; public long Luid; public int Attr; }
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool OpenProcessToken(IntPtr h, int acc, out IntPtr tok);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool LookupPrivilegeValue(string host, string name, ref long luid);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool AdjustTokenPrivileges(IntPtr tok, bool disableAll, ref TokPriv1Luid newState, int len, IntPtr prev, IntPtr relen);
+    [DllImport("kernel32.dll")]
+    static extern bool CloseHandle(IntPtr h);
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode)]
+    static extern int RegCreateKeyEx(UIntPtr hKey, string subKey, int reserved, string cls, int options, int sam, IntPtr sec, out IntPtr result, out int disposition);
+    static readonly UIntPtr HKLM = new UIntPtr(0x80000002u);
+    const int REG_OPTION_BACKUP_RESTORE = 4;
+    const int KEY_ALL_ACCESS = 0xF003F;
+    static bool privs;
+    static void Enable(IntPtr tok, string name) {
+        TokPriv1Luid tp; tp.Count = 1; tp.Luid = 0; tp.Attr = 2;
+        LookupPrivilegeValue(null, name, ref tp.Luid);
+        AdjustTokenPrivileges(tok, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero);
+    }
+    public static RegistryKey Open(string subKey) {
+        if (!privs) {
+            IntPtr tok;
+            if (OpenProcessToken(System.Diagnostics.Process.GetCurrentProcess().Handle, 0x28, out tok)) {
+                Enable(tok, "SeBackupPrivilege");
+                Enable(tok, "SeRestorePrivilege");
+                CloseHandle(tok);
+            }
+            privs = true;
+        }
+        IntPtr h; int disp;
+        int rc = RegCreateKeyEx(HKLM, subKey, 0, null, REG_OPTION_BACKUP_RESTORE, KEY_ALL_ACCESS, IntPtr.Zero, out h, out disp);
+        if (rc != 0) throw new System.ComponentModel.Win32Exception(rc);
+        return RegistryKey.FromHandle(new SafeRegistryHandle(h, true));
+    }
+}
+'@
+    }
+    return [NiixRegForce]::Open($SubPath)
+}
+
 function Set-OfflineReg {
     param([string]$p, [string]$n, [string]$t, [string]$v)
     $key = $null
     try {
-        $key = [Microsoft.Win32.Registry]::LocalMachine.CreateSubKey((Get-RegSubPath $p))
+        $key = [Microsoft.Win32.Registry]::LocalMachine.CreateSubKey((Get-RegSubPath $p), [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree)
         if (-not $key) { throw 'key could not be created' }
-        switch ($t) {
-            'REG_DWORD'     { $key.SetValue($n, [BitConverter]::ToInt32([BitConverter]::GetBytes([uint32]$v), 0), [Microsoft.Win32.RegistryValueKind]::DWord) }
-            'REG_SZ'        { $key.SetValue($n, $v, [Microsoft.Win32.RegistryValueKind]::String) }
-            'REG_EXPAND_SZ' { $key.SetValue($n, $v, [Microsoft.Win32.RegistryValueKind]::ExpandString) }
-            default         { throw "Unsupported value type: $t" }
-        }
+        Write-OfflineRegValue $key $n $t $v
     } catch {
-        $script:RegWarnings.Add("$p\$n : $($_.Exception.Message)")
+        $firstError = $_.Exception.Message
+        if ($key) { $key.Close(); $key = $null }
+        try {
+            $key = Open-OfflineKeyForced (Get-RegSubPath $p)
+            Write-OfflineRegValue $key $n $t $v
+        } catch {
+            $script:RegWarnings.Add("$p\$n : $firstError (forced write also failed: $($_.Exception.Message))")
+        }
     } finally {
         if ($key) { $key.Close() }
     }
