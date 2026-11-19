@@ -1,6 +1,6 @@
 # niixdebloat
 
-by: cuteLiLi / techniix / QuacK
+by: cuteLiLi / techniix / QuacK / decoi
 
 Build a privacy-hardened, debloated, gaming-tuned Windows 11 install ISO from an official Microsoft ISO — no manual post-install cleanup required. Everything below is applied automatically during Windows Setup and at first logon.
 
