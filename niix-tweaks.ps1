@@ -137,6 +137,18 @@ function Set-RegOwned {
     Set-Reg $Path $Name $Type $Value
 }
 
+function Set-RegUnblocked {
+    param([string]$Path, [string]$Name, [string]$Type, [string]$Value, [switch]$Quiet)
+    $src = Join-Path $env:SystemRoot 'System32\reg.exe'
+    $dst = Join-Path $env:TEMP ("niix-reg-{0}.exe" -f [guid]::NewGuid().ToString('N').Substring(0, 8))
+    try {
+        Copy-Item -LiteralPath $src -Destination $dst -Force -ErrorAction Stop
+        $r = Invoke-Quiet $dst ("add `"$Path`" /v `"$Name`" /t $Type /d `"$Value`" /f")
+        if ($r.ExitCode -ne 0 -and -not $Quiet) { Write-Warn "Reg $Path\$Name : $(("$($r.Error)$($r.Output)").Trim())" }
+    } catch { if (-not $Quiet) { Write-Warn "Reg $Path\$Name : $_" } }
+    finally { Remove-Item -LiteralPath $dst -Force -ErrorAction SilentlyContinue }
+}
+
 function Invoke-Quiet {
     param([string]$FilePath, [string]$Arguments)
     $psi = [System.Diagnostics.ProcessStartInfo]::new($FilePath, $Arguments)
@@ -410,8 +422,8 @@ Write-Ok "Copilot, Recall and AI features disabled (Recall neutralized by policy
 Write-Title "9. Cleaning up Taskbar and UI..."
 
 $adv = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'
-& reg add 'HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' /v TaskbarMn /t REG_DWORD /d 0 /f 2>&1 | Out-Null
-& reg add 'HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' /v TaskbarDa /t REG_DWORD /d 0 /f 2>&1 | Out-Null
+Set-RegUnblocked 'HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' 'TaskbarMn' 'REG_DWORD' '0'
+Set-RegUnblocked 'HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' 'TaskbarDa' 'REG_DWORD' '0' -Quiet
 Set-Reg $adv 'ShowTaskViewButton'     'DWord' 0
 Set-Reg $adv 'TaskbarAl'              'DWord' 0
 Set-Reg $adv 'HideFileExt'            'DWord' 0
@@ -425,7 +437,9 @@ Set-Reg $adv 'HideRecommendedSection' 'DWord' 1
 Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer' 'HideRecommendedSection' 'DWord' 1
 Set-Reg $adv 'ShowSecondsInSystemClock' 'DWord' 1
 Set-Reg 'HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32' '' 'String' ''
-Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Dsh'                                   'AllowNewsAndInterests'   'DWord'  0
+if ((Get-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Dsh' -Name 'AllowNewsAndInterests' -ErrorAction SilentlyContinue).AllowNewsAndInterests -ne 0) {
+    Set-RegUnblocked 'HKLM\SOFTWARE\Policies\Microsoft\Dsh' 'AllowNewsAndInterests' 'REG_DWORD' '0'
+}
 Set-Reg 'HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\Start'             'ConfigureStartPins' 'String' '{"pinnedList":[]}'
 Set-Reg 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Search'                  'SearchboxTaskbarMode'    'DWord'  0
 Set-Reg 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Start'                   'ShowRecentList'          'DWord'  0
